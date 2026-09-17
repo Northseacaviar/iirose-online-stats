@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>iirose 在线状态监测</title>
+<style>
+/* ===== 设计令牌:参考调色板(浅/深两套,OS 跟随 + 手动切换) ===== */
+:root {
+  color-scheme: light;
+  --page:            #f9f9f7;
+  --surface-1:       #fcfcfb;
+  --text-primary:    #0b0b0b;
+  --text-secondary:  #52514e;
+  --muted:           #898781;
+  --gridline:        #e1e0d9;
+  --baseline:        #c3c2b7;
+  --border:          rgba(11,11,11,.10);
+  --series-1:        #2a78d6;  /* Online   蓝 */
+  --series-2:        #43b581;  /* Chatting 绿(站点聊天阶梯色) */
+  --series-3:        #faa61a;  /* Active   黄(站点活跃阶梯色) */
+  --series-4:        #f04747;  /* Away     红(站点挂机色) */
+  --series-5:        #a0a0a0;  /* Entering 灰(站点进入色) */
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page:            #0d0d0d;
+    --surface-1:       #1a1a19;
+    --text-primary:    #ffffff;
+    --text-secondary:  #c3c2b7;
+    --muted:           #898781;
+    --gridline:        #2c2c2a;
+    --baseline:        #383835;
+    --border:          rgba(255,255,255,.10);
+    --series-1:        #3987e5;
+    --series-2:        #68b26d;  /* Chatting 绿 */
+    --series-3:        #f89323;  /* Active   黄 */
+    --series-4:        #f04747;  /* Away     红 */
+    --series-5:        #a0a0a0;  /* Entering 灰 */
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:            #0d0d0d;
+  --surface-1:       #1a1a19;
+  --text-primary:    #ffffff;
+  --text-secondary:  #c3c2b7;
+  --muted:           #898781;
+  --gridline:        #2c2c2a;
+  --baseline:        #383835;
+  --border:          rgba(255,255,255,.10);
+  --series-1:        #3987e5;
+  --series-2:        #d95926;
+  --series-3:        #199e70;
+  --series-4:        #c98500;
+  --series-5:        #d55181;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  transition: background .2s, color .2s;
+}
+.viz-root { max-width: 1100px; margin: 0 auto; padding: 24px 20px 48px; }
+
+/* ===== 头部 ===== */
+header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+h1 { font-size: 20px; font-weight: 600; }
+.sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+#themeBtn {
+  font: inherit; font-size: 13px; color: var(--text-secondary);
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; cursor: pointer;
+}
+#themeBtn:hover { border-color: var(--baseline); }
+
+/* ===== 数值瓦片 ===== */
+.tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 16px; }
+@media (max-width: 720px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+.tile {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px 16px;
+}
+.tile .label { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 7px; }
+.tile .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.tile .value { font-size: 26px; font-weight: 600; margin-top: 6px; }
+
+/* ===== 过滤器 ===== */
+.filters { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.filters .grp { display: flex; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.filters button {
+  font: inherit; font-size: 13px; color: var(--text-secondary);
+  background: transparent; border: 0; padding: 6px 14px; cursor: pointer;
+}
+.filters button.active { color: var(--text-primary); font-weight: 600; background: var(--gridline); }
+#updatedAt { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+/* ===== 图表 ===== */
+.chart-wrap {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px 8px 4px;
+}
+#chart { width: 100%; height: clamp(260px, 42vh, 460px); }
+#empty {
+  display: none; height: clamp(260px, 42vh, 460px); align-items: center; justify-content: center;
+  color: var(--muted); font-size: 14px;
+}
+
+/* ===== 数据表格 ===== */
+.table-wrap { margin-top: 16px; }
+.table-wrap h2 { font-size: 14px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; }
+table { width: 100%; border-collapse: collapse; background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+th, td { padding: 8px 12px; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
+th { color: var(--text-secondary); font-weight: 500; border-bottom: 1px solid var(--border); }
+td { color: var(--text-primary); }
+th:first-child, td:first-child { text-align: left; color: var(--muted); }
+tbody tr:nth-child(even) { background: color-mix(in srgb, var(--gridline) 35%, transparent); }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <header>
+    <div>
+      <h1>iirose 在线状态监测</h1>
+      <div class="sub">全站数据 · 每 60 秒采样(可在 config.yaml 修改)</div>
+    </div>
+    <button id="themeBtn" title="切换深浅主题">🌙 深色</button>
+  </header>
+
+  <div class="tiles">
+    <div class="tile"><div class="label"><span class="dot" style="background:var(--series-1)"></span>Online 在线</div><div class="value" id="v-online">—</div></div>
+    <div class="tile"><div class="label"><span class="dot" style="background:var(--series-2)"></span>Chatting 聊天中</div><div class="value" id="v-chatting">—</div></div>
+    <div class="tile"><div class="label"><span class="dot" style="background:var(--series-3)"></span>Active 活跃</div><div class="value" id="v-active">—</div></div>
+    <div class="tile"><div class="label"><span class="dot" style="background:var(--series-4)"></span>Away 挂机</div><div class="value" id="v-away">—</div></div>
+    <div class="tile"><div class="label"><span class="dot" style="background:var(--series-5)"></span>Entering 正在进入</div><div class="value" id="v-entering">—</div></div>
+  </div>
+
+  <div class="filters">
+    <span style="font-size:13px;color:var(--muted)">时间范围</span>
+    <div class="grp" id="rangeGrp">
+      <button data-range="1h">1 小时</button>
+      <button data-range="24h" class="active">24 小时</button>
+      <button data-range="7d">7 天</button>
+      <button data-range="all">全部</button>
+    </div>
+    <span id="updatedAt"></span>
+  </div>
+
+  <div class="chart-wrap">
+    <div id="chart"></div>
+    <div id="empty">暂无数据 —— 等待采集器连上 iirose 并完成首次采样</div>
+  </div>
+
+  <div class="table-wrap">
+    <h2>数据明细(最近 100 条)</h2>
+    <table>
+      <thead><tr>
+        <th>时间</th><th>Online</th><th>Chatting</th><th>Active</th><th>Away</th><th>Entering</th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script src="/static/echarts.min.js"></script>
+<script>
+"use strict";
+const SERIES = [
+  { key: "online",   label: "Online",   slot: "--series-1" },
+  { key: "chatting", label: "Chatting", slot: "--series-2" },
+  { key: "active",   label: "Active",   slot: "--series-3" },
+  { key: "away",     label: "Away",     slot: "--series-4" },
+  { key: "entering", label: "Entering", slot: "--series-5" },
+];
+let currentRange = "24h";
+let chart = null;
+let lastSamples = [];
+let lastDataTs = null;      // 上次轮询拿到的最新采样 ts:未变则不动 DOM/图表
+let lastRenderedTs = null;  // 图表当前绘制的最新 ts
+
+/* ?theme=dark|light 便于无头验证/快速切换 */
+const themeParam = new URLSearchParams(location.search).get("theme");
+if (themeParam === "dark" || themeParam === "light") {
+  document.documentElement.dataset.theme = themeParam;
+}
+
+const root = document.querySelector(".viz-root");
+const cssVar = (name) => getComputedStyle(root).getPropertyValue(name).trim();
+const chartColors = () => SERIES.map((s) => cssVar(s.slot));
+
+/* ===== 主题 ===== */
+const osDark = window.matchMedia("(prefers-color-scheme: dark)");
+function effectiveDark() {
+  const t = document.documentElement.dataset.theme;
+  if (t === "dark") return true;
+  if (t === "light") return false;
+  return osDark.matches;
+}
+function syncThemeBtn() {
+  document.getElementById("themeBtn").textContent = effectiveDark() ? "☀️ 浅色" : "🌙 深色";
+}
+document.getElementById("themeBtn").addEventListener("click", () => {
+  document.documentElement.dataset.theme = effectiveDark() ? "light" : "dark";
+  syncThemeBtn();
+  initChart();
+  renderChart(lastSamples, true);
+});
+osDark.addEventListener("change", () => {
+  if (!document.documentElement.dataset.theme) {
+    initChart();
+    renderChart(lastSamples, true);
+  }
+});
+syncThemeBtn();
+
+/* ===== 图表 ===== */
+function baseOption() {
+  const ink = cssVar("--text-secondary"), muted = cssVar("--muted"),
+        grid = cssVar("--gridline"), axis = cssVar("--baseline");
+  return {
+    animationDuration: 300,
+    color: chartColors(),
+    textStyle: { color: ink, fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif" },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "cross", label: { color: cssVar("--text-primary"), backgroundColor: cssVar("--surface-1") } },
+      backgroundColor: cssVar("--surface-1"),
+      borderColor: cssVar("--baseline"),
+      textStyle: { color: cssVar("--text-primary"), fontSize: 12 },
+    },
+    legend: {
+      top: 0, left: 0, icon: "roundRect", itemWidth: 14, itemHeight: 4,
+      textStyle: { color: ink, fontSize: 12 },
+    },
+    grid: { left: 8, right: 64, top: 36, bottom: 8, containLabel: true },
+    xAxis: {
+      type: "time",
+      axisLine: { lineStyle: { color: axis } },
+      axisLabel: { color: muted, fontSize: 11 },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      minInterval: 1,
+      axisLine: { show: false },
+      axisLabel: { color: muted, fontSize: 11 },
+      splitLine: { lineStyle: { color: grid, width: 1 } },
+    },
+  };
+}
+
+function seriesOption(samples) {
+  return SERIES.map((s) => ({
+    name: s.label,
+    type: "line",
+    data: samples.map((r) => [new Date(r.ts), r[s.key]]),
+    showSymbol: false,
+    lineStyle: { width: 2 },
+    emphasis: { lineStyle: { width: 3 } },
+    endLabel: {
+      show: samples.length > 0,
+      formatter: (p) => p.seriesName + " " + (p.value[1] ?? "—"),
+      color: cssVar("--text-secondary"),
+      fontSize: 11,
+      distance: 8,
+    },
+  }));
+}
+
+function initChart() {
+  const dom = document.getElementById("chart");
+  if (chart) { chart.dispose(); chart = null; }
+  chart = echarts.init(dom, null, { renderer: "canvas" });
+}
+
+function renderChart(samples, force) {
+  lastSamples = samples;
+  const lastTs = samples.length ? samples[samples.length - 1].ts : null;
+  // 无新数据时跳过重绘(轮询比采样频繁,5/6 的轮询是空跑)
+  if (!force && lastTs !== null && lastTs === lastRenderedTs) return;
+  if (!chart) initChart();
+  const dom = document.getElementById("chart");
+  const empty = document.getElementById("empty");
+  empty.style.display = samples.length ? "none" : "flex";
+  dom.style.display = samples.length ? "block" : "none";
+  if (samples.length) {
+    // 动画只播首次(此后每秒刷新都瞬时重绘,避免长列表反复播动画造成卡顿)
+    chart.setOption({ ...baseOption(), animation: lastRenderedTs === null, series: seriesOption(samples) }, true);
+    lastRenderedTs = lastTs;
+  }
+}
+
+/* ===== 数据 ===== */
+async function refresh(force) {
+  try {
+    const [seriesResp, latestResp] = await Promise.all([
+      fetch(`/api/series?range=${currentRange}`),
+      fetch("/api/latest"),
+    ]);
+    const { samples } = await seriesResp.json();
+    const lastTs = samples.length ? samples[samples.length - 1].ts : null;
+    if (!force && lastTs !== null && lastTs === lastDataTs) return; // 采样未变,不动 DOM
+    lastDataTs = lastTs;
+    renderChart(samples, force);
+
+    const { sample } = await latestResp.json();
+    if (sample) {
+      for (const s of SERIES) document.getElementById("v-" + s.key).textContent = sample[s.key];
+      document.getElementById("updatedAt").textContent = "最后采样 " + sample.ts.replace("T", " ").slice(5, 19);
+    }
+
+    const tbody = document.getElementById("tbody");
+    const rows = samples.slice(-100).reverse();
+    tbody.innerHTML = rows.map((r) => `<tr><td>${r.ts.replace("T", " ").slice(5, 19)}</td>` +
+      SERIES.map((s) => `<td>${r[s.key]}</td>`).join("") + "</tr>").join("");
+  } catch (e) {
+    document.getElementById("updatedAt").textContent = "刷新失败,稍后重试";
+  }
+}
+
+/* 容器尺寸变化(悬浮窗面板拖拽、窗口缩放)时同步图表画布 */
+if (window.ResizeObserver) {
+  new ResizeObserver(() => { if (chart) chart.resize(); })
+    .observe(document.getElementById("chart"));
+}
+
+document.getElementById("rangeGrp").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-range]");
+  if (!btn) return;
+  currentRange = btn.dataset.range;
+  document.querySelectorAll("#rangeGrp button").forEach((b) => b.classList.toggle("active", b === btn));
+  refresh(true);
+});
+
+refresh(true);
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

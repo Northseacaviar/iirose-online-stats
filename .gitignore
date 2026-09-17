@@ -1,0 +1,14 @@
+# ==== 敏感文件:禁止入库(凭据)====
+app/config.yaml
+config.yaml
+
+# ==== 运行时数据与日志 ====
+app/data/
+app/logs/
+data/
+logs/
+
+# ==== Python ====
+.venv/
+__pycache__/
+*.pyc
