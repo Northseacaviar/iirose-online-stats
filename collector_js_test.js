@@ -38,6 +38,7 @@ function makeEl(tag) {
             c.parentNode = null;
         },
         addEventListener(ev, fn) { (this._listeners ||= {})[ev] = fn; },
+        click() { const fn = this._listeners && this._listeners.click; if (fn) fn({ stopPropagation() {} }); },
         querySelectorAll(sel) {
             const cls = sel.trim().split(/\s+/).pop().slice(1);
             const out = [];
@@ -47,6 +48,16 @@ function makeEl(tag) {
             };
             walk(this);
             return out;
+        },
+        getBoundingClientRect() {
+            const w = parseInt(this.style.width) || 0;
+            const h = parseInt(this.style.height) || 0;
+            let l = 0, t = 0;
+            if (this.style.left) l = parseInt(this.style.left);
+            else if (this.style.right) l = 1920 - parseInt(this.style.right) - w;
+            if (this.style.top) t = parseInt(this.style.top);
+            else if (this.style.bottom) t = 1080 - parseInt(this.style.bottom) - h;
+            return { left: l, top: t, right: l + w, bottom: t + h, width: w, height: h };
         },
     };
     Object.defineProperty(node, 'offsetWidth', { get() { return parseInt(this.style.width) || 0; } });
@@ -64,6 +75,8 @@ global.document = {
     createElement: makeEl,
     body,
     readyState: 'complete',
+    topEl: null, // 测试:elementFromPoint 返回的最顶层元素(模拟站点遮挡层)
+    elementFromPoint() { return this.topEl; },
     addEventListener(ev, fn) { docListeners[ev] = fn; },
     removeEventListener(ev) { delete docListeners[ev]; },
 };
@@ -94,19 +107,34 @@ global.window = {
     devicePixelRatio: 1,
     open: () => { opened = true; },
 };
+/* window 捕获/冒泡监听表(键 = 事件名 + ':c' 表示捕获) */
+const winListeners = {};
+global.window.addEventListener = (ev, fn, capOrOpts) => {
+    const cap = typeof capOrOpts === 'object' ? !!capOrOpts.capture : !!capOrOpts;
+    (winListeners[ev + (cap ? ':c' : '')] ||= []).push(fn);
+};
+global.window.removeEventListener = (ev, fn, capOrOpts) => {
+    const cap = typeof capOrOpts === 'object' ? !!capOrOpts.capture : !!capOrOpts;
+    const k = ev + (cap ? ':c' : '');
+    if (winListeners[k]) winListeners[k] = winListeners[k].filter((f) => f !== fn);
+};
+const fireWin = (ev, props = {}) => {
+    (winListeners[ev + ':c'] || []).slice().forEach((f) => f({ type: ev, preventDefault() {}, stopPropagation() {}, ...props }));
+};
+const hasWin = (ev) => (winListeners[ev + ':c'] || []).length > 0;
 const posted = [];
 const seriesUrls = [];
+let mockSeries = {
+    interval_seconds: 60,
+    samples: [
+        { ts: '2026-09-17T10:00:00', online: 6, chatting: 2, active: 2, away: 1, entering: 1 },
+        { ts: '2026-09-17T10:01:00', online: 8, chatting: 3, active: 2, away: 1, entering: 1 },
+    ],
+};
 global.fetch = (url, opts) => {
     if (String(url).includes('/api/series')) {
         seriesUrls.push(String(url));
-        return Promise.resolve({
-            json: () => Promise.resolve({
-                samples: [
-                    { ts: '2026-09-17T10:00:00', online: 6, chatting: 2, active: 2, away: 1, entering: 1 },
-                    { ts: '2026-09-17T10:01:00', online: 8, chatting: 3, active: 2, away: 1, entering: 1 },
-                ],
-            }),
-        });
+        return Promise.resolve({ json: () => Promise.resolve(mockSeries) });
     }
     posted.push(JSON.parse(opts.body));
     return Promise.resolve({ ok: true });
@@ -151,27 +179,99 @@ eval(code);
     panel._listeners.wheel({ deltaY: 100, deltaMode: 0, preventDefault() { this.pd = true; }, stopPropagation() {} });
     assert(panel.scrollTop === 100, '滚轮手动滚动面板(deltaY 生效)');
 
-    /* 拖动标题栏移动 */
+    /* 拖动标题栏移动(移动/抬起监听在 window 捕获阶段,站点拦截不住) */
     const bar = panel.children[0];
     bar._listeners.pointerdown({ clientX: 100, clientY: 100, preventDefault() {} });
-    assert(!!docListeners.pointermove, '拖拽开始监听 pointermove');
-    docListeners.pointermove({ clientX: 250, clientY: 150 });
+    assert(hasWin('pointermove'), '拖拽开始监听 window 捕获 pointermove');
+    fireWin('pointermove', { clientX: 250, clientY: 150 });
     assert(panel.style.left === '1338px' && panel.style.top === '374px', '面板被拖动到新位置');
-    docListeners.pointerup();
+    fireWin('pointerup');
     assert(storage['iirose_stats_panel'] === '{"x":1338,"y":374,"w":720,"h":560}', '位置写入 localStorage');
 
     /* 右下角拖拽调大小(按当前位置钳制) */
     const grip = panel.children[6];
     grip._listeners.pointerdown({ clientX: 0, clientY: 0, preventDefault() {} });
-    docListeners.pointermove({ clientX: 200, clientY: 150 });
+    fireWin('pointermove', { clientX: 200, clientY: 150 });
     assert(panel.style.width === '570px' && panel.style.height === '646px', '拖拽调整大小(右缘不超视口)');
-    docListeners.pointerup();
+    fireWin('pointerup');
+
+    /* 鼠标通道兜底:站点拦截 pointer 事件时,仅 mousedown/mousemove 也能拖动 */
+    bar._listeners.mousedown({ clientX: 100, clientY: 100, preventDefault() {} });
+    assert(hasWin('mousemove'), '鼠标通道:mousedown 启动拖动');
+    fireWin('mousemove', { clientX: 300, clientY: 200 });
+    assert(panel.style.left === '1538px' && panel.style.top === '474px', '鼠标通道:面板被拖动到新位置');
+    fireWin('mouseup');
+    assert(JSON.parse(storage['iirose_stats_panel']).x === 1538, '鼠标通道:位置写入 localStorage');
+
+    /* data-nodrag 守卫:按下关闭钮/链接不启动拖动 */
+    bar._listeners.pointerdown({ target: panel.children[0].children[2], clientX: 0, clientY: 0, preventDefault() {} });
+    assert(!hasWin('pointermove'), '关闭钮按下不启动拖动');
+
+    /* 遮挡防护:站点置顶层盖在面板上时,window 捕获阶段按坐标接管 */
+    const overlay = makeEl('div');
+    overlay.className = 'site-mask';
+    document.topEl = overlay;
+    // shim 无布局引擎:手动给标题栏/关闭钮摆放面板内坐标(面板当前 1538,474 / 570×646)
+    bar.style.left = '1538px'; bar.style.top = '474px'; bar.style.width = '200px'; bar.style.height = '34px';
+    const closeBtn = bar.children[2];
+    closeBtn.style.left = '1700px'; closeBtn.style.top = '478px'; closeBtn.style.width = '20px'; closeBtn.style.height = '20px';
+
+    fireWin('pointerdown', { clientX: 1550, clientY: 485 }); // 标题栏空白区
+    assert(hasWin('pointermove'), '遮挡下按下标题栏仍启动拖动');
+    fireWin('pointermove', { clientX: 1600, clientY: 535 });
+    assert(panel.style.left === '1588px' && panel.style.top === '524px', '遮挡下拖动面板生效');
+    fireWin('pointerup', { clientX: 1600, clientY: 535 });
+    // 拖动后同步模拟布局坐标
+    bar.style.left = '1588px'; bar.style.top = '524px';
+    closeBtn.style.left = '1750px'; closeBtn.style.top = '528px';
+
+    fireWin('pointerdown', { clientX: 1760, clientY: 538 }); // 关闭钮
+    fireWin('pointerup', { clientX: 1760, clientY: 538 });
+    assert(body.children.length === 1, '遮挡下点击关闭钮仍能关闭面板');
+
+    // 遮挡下点击悬浮按钮开关面板(按钮位置模拟在面板上方空白处)
+    btn._listeners.click(); // 常规路径重开
+    btn.style.left = '1800px'; btn.style.top = '400px'; btn.style.width = '60px'; btn.style.height = '30px';
+    fireWin('pointerdown', { clientX: 1830, clientY: 415 });
+    fireWin('pointerup', { clientX: 1830, clientY: 415 });
+    assert(body.children.length === 1, '遮挡下点击悬浮按钮仍能开关面板');
+
+    // 遮挡下滚轮仍能滚动面板
+    btn._listeners.click(); // 重开
+    const panel3 = body.children[1];
+    fireWin('wheel', { clientX: 1650, clientY: 600, deltaY: 100, deltaMode: 0 });
+    assert(panel3.scrollTop === 100, '遮挡下滚轮仍能滚动面板');
+    document.topEl = null;
 
     /* 范围切换 */
     panel.children[2].children[0]._listeners.click();
     await flush();
     assert(seriesUrls.some((u) => u.includes('range=1h')), '点击 1h 切换图表范围');
     assert(seriesUrls.some((u) => u.includes('range=24h')), '打开面板默认拉取 24h');
+
+    /* 图表缺口:相邻样本间隔 > 2×采样间隔 → 补空点,曲线断开不跨缺口连线 */
+    mockSeries = {
+        interval_seconds: 60,
+        samples: [
+            { ts: '2026-09-17T10:00:00', online: 100, chatting: 10, active: 20, away: 50, entering: 2 },
+            { ts: '2026-09-17T10:06:00', online: 110, chatting: 12, active: 22, away: 55, entering: 2 },
+        ],
+    };
+    panel.children[2].children[1]._listeners.click(); // 点 24h 重新拉取
+    await flush();
+    const info = window.iiroseStats.chartInfo();
+    assert(info.points === 7, '6 分钟缺口按 60s 节拍补 5 个空点(2 实 + 5 空)');
+    assert(info.gaps === 5, '空点标记为 null,曲线在缺口处断开');
+    mockSeries = {
+        interval_seconds: 60,
+        samples: [
+            { ts: '2026-09-17T10:00:00', online: 100, chatting: 10, active: 20, away: 50, entering: 2 },
+            { ts: '2026-09-17T10:01:00', online: 110, chatting: 12, active: 22, away: 55, entering: 2 },
+        ],
+    };
+    panel.children[2].children[0]._listeners.click(); // 点 1h 重新拉取
+    await flush();
+    assert(window.iiroseStats.chartInfo().gaps === 0, '连续数据(间隔=采样节拍)不补空点');
 
     /* 完整仪表盘链接 */
     panel.children[0].children[1]._listeners.click({ stopPropagation() {} });
@@ -182,7 +282,7 @@ eval(code);
     assert(body.children.length === 1, '✕ 关闭面板');
     btn._listeners.click();
     const panel2 = body.children[1];
-    assert(panel2.style.left === '1338px' && panel2.style.width === '570px', '重开面板恢复记忆的位置与尺寸');
+    assert(panel2.style.left === '1588px' && panel2.style.width === '570px', '重开面板恢复记忆的位置与尺寸');
 
     if (failed) { console.error(failed + ' assertion(s) failed'); process.exit(1); }
     console.log('ALL PASS');

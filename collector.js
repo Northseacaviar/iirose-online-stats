@@ -26,7 +26,7 @@
     /* ===== 外观/行为配置 ===== */
     var BTN_RIGHT = '12px';
     var BTN_BOTTOM_PX = 140;
-    var Z = '2147483000';
+    var Z = '2147483647';
     var PANEL_KEY = 'iirose_stats_panel';      // {x,y,w,h}
     var KEYS = ['online', 'chatting', 'active', 'away', 'entering'];
     var LABELS = ['Online', 'Chatting', 'Active', 'Away', 'Entering'];
@@ -63,9 +63,14 @@
     /* ===== 悬浮按钮 ===== */
     var btn = null;
     var panel = null;
+    var bar = null;        // 面板标题栏(拖动把手)
+    var grip = null;       // 右下角调大小把手
+    var dragging = false;  // pointer/mouse 双通道拖动的防重入标记
+    var pressHit = null;   // 遮挡防护:按下时命中的目标(悬浮按钮/交互子元素)
     var chartCanvas = null;
     var chartData = null;
     var chartRange = '24h';
+    var chartInterval = 60; // 服务端采样间隔(秒),用于识别数据缺口
     var legendVals = [];
 
     function buildButton() {
@@ -127,12 +132,15 @@
         panel.style.top = st.y + 'px';
         panel.style.width = st.w + 'px';
         panel.style.height = st.h + 'px';
+        panel.id = 'iirose-stats-panel';
 
         /* 标题栏:空白区可拖动移动 */
-        var bar = document.createElement('div');
+        bar = document.createElement('div');
+        bar.id = 'iirose-stats-bar';
         bar.style.cssText =
             'flex:none;display:flex;align-items:center;gap:10px;' +
-            'padding:7px 12px;background:rgba(255,255,255,.05);cursor:move;user-select:none;';
+            'padding:7px 12px;background:rgba(255,255,255,.05);cursor:move;user-select:none;' +
+            'touch-action:none;';
         var title = document.createElement('span');
         title.textContent = '📊 iirose 在线状态监测';
         title.style.cssText = 'font:12px system-ui,sans-serif;color:#c3c2b7;';
@@ -140,6 +148,8 @@
         full.textContent = '🖥 完整仪表盘';
         full.title = '在新标签页打开完整仪表盘';
         full.style.cssText = 'cursor:pointer;color:#8ab4f8;font:12px system-ui,sans-serif;';
+        full.dataset.nodrag = '1';
+        full.className = 'iirose-act';
         full.addEventListener('click', function (e) {
             e.stopPropagation();
             window.open(DASHBOARD, '_blank');
@@ -151,6 +161,8 @@
         close.style.cssText =
             'margin-left:auto;cursor:pointer;color:#c3c2b7;font:13px system-ui,sans-serif;' +
             'padding:2px 8px;border-radius:5px;';
+        close.dataset.nodrag = '1';
+        close.className = 'iirose-act';
         close.addEventListener('mouseenter', function () { close.style.background = 'rgba(255,255,255,.12)'; });
         close.addEventListener('mouseleave', function () { close.style.background = ''; });
         close.addEventListener('click', closePanel);
@@ -158,7 +170,9 @@
         bar.appendChild(title);
         bar.appendChild(full);
         bar.appendChild(close);
+        /* pointer + mouse 双通道:站点拦截 pointer 事件时用 mouse 兜底 */
         bar.addEventListener('pointerdown', startDrag);
+        bar.addEventListener('mousedown', startDrag);
 
         /* 指标瓦片 */
         var tiles = document.createElement('div');
@@ -193,6 +207,7 @@
             var b = document.createElement('span');
             b.textContent = r;
             b.dataset.range = r;
+            b.className = 'iirose-act';
             b.style.cssText =
                 'cursor:pointer;padding:2px 10px;border-radius:6px;font-size:11px;color:#c3c2b7;' +
                 'border:1px solid rgba(255,255,255,.1);' +
@@ -242,13 +257,14 @@
         foot.textContent = '数据:本站终端 stats 同源 · 每 ' + (INTERVAL_MS / 1000) + ' 秒上报本机';
 
         /* 右下角拖拽调大小 */
-        var grip = document.createElement('div');
+        grip = document.createElement('div');
         grip.textContent = '⤡';
         grip.title = '拖动调整大小';
         grip.style.cssText =
             'position:absolute;right:2px;bottom:2px;width:18px;height:18px;line-height:16px;' +
             'text-align:center;cursor:nwse-resize;color:#777;font-size:13px;user-select:none;';
         grip.addEventListener('pointerdown', startResize);
+        grip.addEventListener('mousedown', startResize);
 
         /* 面板内滚轮手动滚动:capture + preventDefault,站点任何滚轮逻辑都拦不住 */
         panel.addEventListener('wheel', function (e) {
@@ -275,49 +291,179 @@
         if (window.__iirose_stats_sample) updateUI(window.__iirose_stats_sample);
     }
 
-    /* ===== 拖动移动(标题栏空白区;按钮自身已 stopPropagation) ===== */
+    /* ===== 拖动移动(标题栏空白区;链接/关闭钮带 data-nodrag,按下即忽略) =====
+     * pointer + mouse 双通道监听:站点或其更新若拦截 pointer 事件,mousedown 兜底。
+     * 拖动中标题栏高亮,可作为"事件是否到达"的目视诊断。 */
     function startDrag(e) {
-        if (!panel) return;
+        if (!panel || dragging) return;
+        if (e.target && e.target.dataset && e.target.dataset.nodrag) return;
+        dragging = true;
         e.preventDefault();
         var sx = e.clientX, sy = e.clientY;
         var ox = panel.offsetLeft, oy = panel.offsetTop;
+        panel.style.userSelect = 'none';
+        var barBg = bar.style.background;
+        bar.style.background = 'rgba(255,255,255,.14)';
         var move = function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
             panel.style.left = Math.max(-panel.offsetWidth + 120,
                 Math.min(window.innerWidth - 120, ox + (ev.clientX - sx))) + 'px';
             panel.style.top = Math.max(0,
                 Math.min(window.innerHeight - 60, oy + (ev.clientY - sy))) + 'px';
         };
-        var up = function () {
-            document.removeEventListener('pointermove', move);
-            document.removeEventListener('pointerup', up);
+        var up = function (ev) {
+            if (ev && ev.stopPropagation) ev.stopPropagation();
+            dragging = false;
+            panel.style.userSelect = '';
+            bar.style.background = barBg;
+            window.removeEventListener('pointermove', move, true);
+            window.removeEventListener('pointerup', up, true);
+            window.removeEventListener('mousemove', move, true);
+            window.removeEventListener('mouseup', up, true);
             savePanelState();
         };
-        document.addEventListener('pointermove', move);
-        document.addEventListener('pointerup', up);
+        /* window 捕获阶段:事件最先到达,站点任何元素级监听都拦不住移动 */
+        window.addEventListener('pointermove', move, true);
+        window.addEventListener('pointerup', up, true);
+        window.addEventListener('mousemove', move, true);
+        window.addEventListener('mouseup', up, true);
     }
 
     /* ===== 右下角拖拽调大小 ===== */
     function startResize(e) {
-        if (!panel) return;
+        if (!panel || dragging) return;
+        dragging = true;
         e.preventDefault();
         var sx = e.clientX, sy = e.clientY;
         var sw = panel.offsetWidth, sh = panel.offsetHeight;
         var move = function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
             panel.style.width = Math.max(360,
                 Math.min(window.innerWidth - panel.offsetLeft - 12, sw + (ev.clientX - sx))) + 'px';
             panel.style.height = Math.max(280,
                 Math.min(window.innerHeight - panel.offsetTop - 60, sh + (ev.clientY - sy))) + 'px';
         };
-        var up = function () {
-            document.removeEventListener('pointermove', move);
-            document.removeEventListener('pointerup', up);
+        var up = function (ev) {
+            if (ev && ev.stopPropagation) ev.stopPropagation();
+            dragging = false;
+            window.removeEventListener('pointermove', move, true);
+            window.removeEventListener('pointerup', up, true);
+            window.removeEventListener('mousemove', move, true);
+            window.removeEventListener('mouseup', up, true);
             savePanelState();
         };
-        document.addEventListener('pointermove', move);
-        document.addEventListener('pointerup', up);
+        window.addEventListener('pointermove', move, true);
+        window.addEventListener('pointerup', up, true);
+        window.addEventListener('mousemove', move, true);
+        window.addEventListener('mouseup', up, true);
+    }
+
+    /* ===== 遮挡防护:window 捕获阶段按坐标接管 =====
+     * 若站点有置顶层(公告/维护提示等)盖在悬浮 UI 上,事件永远到不了我们
+     * 身上。捕获阶段事件最先到达 window,按坐标判断是否落在自家 UI 上:
+     * 落在 → stopPropagation 接管并自行处理;否则放行,不干扰站点。
+     * 事件正常命中自家元素时(无遮挡)直接放行,走常规流程。 */
+    function isOurs(el) {
+        while (el) {
+            if (el === btn || el === panel) return true;
+            el = el.parentNode;
+        }
+        return false;
+    }
+    function rectOf(el) {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+        var r = el.getBoundingClientRect();
+        if (r && r.width > 0 && r.height > 0) return r;
+        return null;
+    }
+    function inside(r, x, y) {
+        return !!r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    }
+    function hitTest(x, y) {
+        if (!btn && !panel) return null;
+        if (panel) {
+            var pr = rectOf(panel);
+            if (inside(pr, x, y)) {
+                var kids = panel.querySelectorAll ? panel.querySelectorAll('.iirose-act') : [];
+                for (var i = 0; i < kids.length; i++) {
+                    if (inside(rectOf(kids[i]), x, y)) return { kind: 'click', el: kids[i] };
+                }
+                if (inside(rectOf(bar), x, y)) return { kind: 'bar', el: bar };
+                if (inside(rectOf(grip), x, y)) return { kind: 'grip', el: grip };
+                return { kind: 'panel', el: panel };
+            }
+        }
+        if (btn && inside(rectOf(btn), x, y)) return { kind: 'btn', el: btn };
+        return null;
+    }
+    function onPressCapture(e) {
+        if (e.type === 'mousedown' && (dragging || pressHit)) return; // pointer 已接管
+        var top = document.elementFromPoint(e.clientX, e.clientY);
+        if (isOurs(top)) return; // 无遮挡:常规流程即可
+        var hit = hitTest(e.clientX, e.clientY);
+        if (!hit) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (hit.kind === 'bar') { startDrag(e); return; }
+        if (hit.kind === 'grip') { startResize(e); return; }
+        if (hit.kind === 'btn' || hit.kind === 'click') pressHit = hit;
+        /* 'panel':仅吞掉本次点击,不给站点遮挡层 */
+    }
+    function onUpCapture(e) {
+        if (!pressHit) return;
+        e.preventDefault();
+        e.stopPropagation();
+        var hit = pressHit;
+        pressHit = null;
+        if (!inside(rectOf(hit.el), e.clientX, e.clientY)) return; // 移开即取消
+        if (hit.kind === 'btn') togglePanel();
+        else if (hit.kind === 'click' && typeof hit.el.click === 'function') hit.el.click();
+    }
+    function onWheelCapture(e) {
+        if (!panel) return;
+        var top = document.elementFromPoint ? document.elementFromPoint(e.clientX, e.clientY) : null;
+        if (isOurs(top)) return; // 无遮挡:面板自带 capture wheel 已处理
+        if (!inside(rectOf(panel), e.clientX, e.clientY)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        var d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+        panel.scrollTop += d;
+    }
+    if (window.addEventListener && document.elementFromPoint) {
+        window.addEventListener('pointerdown', onPressCapture, true);
+        window.addEventListener('mousedown', onPressCapture, true);
+        window.addEventListener('pointerup', onUpCapture, true);
+        window.addEventListener('mouseup', onUpCapture, true);
+        window.addEventListener('wheel', onWheelCapture, { capture: true, passive: false });
     }
 
     /* ===== 走势图(轻量 canvas,无依赖) ===== */
+
+    /* 数据缺口按采样节拍补空点:曲线在缺口处断开,而不是跨越连线(与完整仪表盘一致) */
+    function padGaps(samples, intervalSec) {
+        var stepMs = intervalSec * 1000;
+        function pad(n) { return (n < 10 ? '0' : '') + n; }
+        function fmt(d) {
+            return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+                'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+        }
+        var out = [];
+        for (var i = 0; i < samples.length; i++) {
+            out.push(samples[i]);
+            if (i === samples.length - 1) break;
+            var t0 = new Date(samples[i].ts).getTime();
+            var t1 = new Date(samples[i + 1].ts).getTime();
+            if (t1 - t0 > stepMs * 2) {
+                for (var t = t0 + stepMs; t + stepMs <= t1; t += stepMs) {
+                    out.push({ ts: fmt(new Date(t)), online: null, chatting: null, active: null, away: null, entering: null });
+                }
+            }
+        }
+        return out;
+    }
+
     function drawChart() {
         if (!panel || !chartCanvas) return;
         var c = chartCanvas;
@@ -363,17 +509,20 @@
             ctx.fillText(String(Math.round(val)), padL - 5, py);
         }
 
-        /* 五条折线 */
+        /* 五条折线(null 空点处断开,不跨缺口连线) */
         ctx.lineWidth = 1.6;
         ctx.lineJoin = 'round';
         for (var s = 0; s < KEYS.length; s++) {
             ctx.strokeStyle = COLORS[s];
             ctx.beginPath();
+            var started = false;
             for (var i = 0; i < n; i++) {
+                var v = data[i][KEYS[s]];
+                if (v === null || v === undefined) { started = false; continue; } // 缺口:断开曲线
                 var x = padL + plotW * i / (n - 1);
-                var y = padT + plotH - plotH * (data[i][KEYS[s]] || 0) / max;
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
+                var y = padT + plotH - plotH * v / max;
+                if (started) ctx.lineTo(x, y);
+                else { ctx.moveTo(x, y); started = true; }
             }
             ctx.stroke();
         }
@@ -403,7 +552,8 @@
         fetch(SERIES_URL + chartRange)
             .then(function (r) { return r.json(); })
             .then(function (j) {
-                chartData = j.samples || [];
+                chartInterval = Number(j.interval_seconds) || 60;
+                chartData = padGaps(j.samples || [], chartInterval);
                 drawChart();
                 updateLegend();
             })
@@ -479,5 +629,28 @@
     }
 
     /* 调试入口:控制台 iiroseStats.now() 立即算一次并上报 */
-    window.iiroseStats = { compute: compute, now: function () { post(compute()); } };
+    window.iiroseStats = {
+        compute: compute,
+        now: function () { post(compute()); },
+        /* 诊断:某坐标处最顶层元素是谁(判断面板是否被站点元素遮挡) */
+        whatsAt: function (x, y) {
+            var el = document.elementFromPoint(x, y);
+            if (!el) return null;
+            return (el.id ? '#' + el.id : '<' + el.tagName + '>') +
+                (typeof el.className === 'string' && el.className ? '.' + el.className : '');
+        },
+        /* 一键诊断:面板标题栏中心处最顶层元素(应为 #iirose-stats-bar) */
+        barCovered: function () {
+            if (!bar) return 'no-panel';
+            var r = bar.getBoundingClientRect();
+            return this.whatsAt(r.left + r.width / 2, r.top + r.height / 2);
+        },
+        /* 图表缺口诊断:points=总点数(含补的空点),gaps=空点数(断口) */
+        chartInfo: function () {
+            if (!chartData) return { points: 0, gaps: 0 };
+            var gaps = 0;
+            chartData.forEach(function (r) { if (r.online === null) gaps++; });
+            return { points: chartData.length, gaps: gaps };
+        },
+    };
 })();
