@@ -135,6 +135,17 @@ def test_ingest_row_appears_in_series_api(tmp_path):
     asyncio.run(run())
 
 
+def test_series_api_supports_all_ranges(tmp_path):
+    async def run():
+        db = Database(tmp_path / "t.db")
+        async with _client(db) as cli:
+            for rng in ("1h", "3h", "8h", "24h", "7d", "all"):
+                resp = await cli.get(f"/api/series?range={rng}")
+                assert resp.status == 200, rng
+                assert (await resp.json())["range"] == rng
+    asyncio.run(run())
+
+
 def test_ingest_rejects_anomalous_sample(tmp_path):
     async def run():
         db = Database(tmp_path / "t.db")

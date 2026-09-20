@@ -19,12 +19,11 @@ python -m venv .venv
 
 浏览器打开 <http://127.0.0.1:8080> 查看走势图。
 
-- **一键开关**:双击项目根目录或桌面上的 `监测开关.bat` —— 未运行=启动,运行中=停止(以 8080 端口判断;临时停/开不用再开任务管理器)
-- 图表:5 条曲线 + 图例 + 十字线提示 + 最新值端标签;时间范围 1 小时 / 24 小时 / 7 天 / 全部;深浅主题跟随系统,右上角可手动切换;页面底部有数据明细表
+- 图表:5 条曲线 + 图例 + 十字线提示 + 最新值端标签;时间范围 1 小时 / 3 小时 / 8 小时 / 24 小时 / 7 天 / 全部;深浅主题跟随系统,右上角可手动切换;页面底部有数据明细表
 - 数据文件:`data/iirose_stats.db`(SQLite,`samples` 表)
 - 日志:`logs/collector.log`(控制台同步输出)
 
-**开关与网页联动(当前模式)**:开机自启已移除。想监测时双击项目根目录或桌面上的 `监测开关.bat` 启动(后台静默、无窗口);程序连续收不到网页脚本上报满 `browser_idle_exit_minutes`(默认 10 分钟)会自动退出,判定为页面已关闭——「打开网页 = 监测,关掉网页 = 自动停」。想恢复常驻:config.yaml 设 `browser_idle_exit_minutes: 0`;想恢复开机自启:把 `app/autostart.vbs` 复制到 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`。注意:程序已在运行时不要双击 start.bat 或开关重复启动(第二个实例会因端口占用自动退出)。
+**启动方式(打开网页即监测)**:双击 `app/start.bat` 启动服务(后台静默、无窗口),服务启动后**常驻**——**打开 iirose 网页即开始采集**,关掉网页数据留空缺、服务常驻等待下次打开。停止服务:任务管理器结束 `pythonw.exe`。程序已在运行时不要重复启动(第二个实例会因端口占用自动退出)。
 
 ## 配置(config.yaml)
 
@@ -32,8 +31,7 @@ python -m venv .venv
 |---|---|
 | `interval_seconds` | 采样间隔秒数,默认 60 |
 | `http.host` / `http.port` | 仪表盘监听地址与端口 |
-| `ws.enabled` | `true` = 本地 WS 采集(需要 account);`false` = **只接收网页 JS 脚本上报**(程序仅托管仪表盘与入库,不登录 WS,页面不开则无数据) |
-| `browser_idle_exit_minutes` | 网页脚本模式(`ws.enabled: false`)专属:连续多少分钟无上报就自动退出(页面关闭后程序自停);`0` = 常驻不退出 |
+| `ws.enabled` | `true` = 本地 WS 采集(需要 account);`false` = **只接收网页 JS 脚本上报**(程序常驻托管仪表盘与入库,不登录 WS,打开网页即开始采集) |
 | `ws.hosts` / `ws.port` | WebSocket 主机列表与端口(线上 = wss 443) |
 | `account.username` / `password` | **登录账号**(必填,仅存本机;统计是全站的,任意账号/房间均可)。加固选项:设置环境变量 `IIROSE_PASSWORD` 可覆盖配置文件中的密码,config.yaml 里可不存明文 |
 | `account.room` | 登录后进入的房间(空间站 `5ce6a4b520a90` 恒可用) |

@@ -22,6 +22,8 @@
     var SERIES_URL = 'http://127.0.0.1:8080/api/series?range=';
     var DASHBOARD = 'http://127.0.0.1:8080/';
     var INTERVAL_MS = 60 * 1000;
+    /* 固定时间窗口(毫秒):图表横轴始终显示完整范围,缺失时段留空不压缩 */
+    var RANGE_MS = { '1h': 3600000, '3h': 10800000, '8h': 28800000, '24h': 86400000, '7d': 604800000 };
 
     /* ===== 外观/行为配置 ===== */
     var BTN_RIGHT = '12px';
@@ -71,6 +73,7 @@
     var chartData = null;
     var chartRange = '24h';
     var chartInterval = 60; // 服务端采样间隔(秒),用于识别数据缺口
+    var chartWindowMs = RANGE_MS['24h']; // 当前范围的固定时间窗口
     var legendVals = [];
 
     function buildButton() {
@@ -192,9 +195,9 @@
     function buildRanges() {
         var ranges = document.createElement('div');
         ranges.style.cssText = 'flex:none;display:flex;gap:4px;padding:8px 10px 0;';
-        ['1h', '24h', '7d'].forEach(function (r) {
+        ['1h', '3h', '8h', '24h', '7d', 'all'].forEach(function (r) {
             var b = document.createElement('span');
-            b.textContent = r;
+            b.textContent = r === 'all' ? '全部' : r;  // 与仪表盘一致的显示名
             b.dataset.range = r;
             b.className = 'iirose-act';
             b.style.cssText =
@@ -459,27 +462,39 @@
 
     /* ===== 走势图(轻量 canvas,无依赖) ===== */
 
-    /* 与 app/web/dashboard.html 中的 padGaps 保持同步,两处需同时修改!
-     * 数据缺口按采样节拍补空点:曲线在缺口处断开,而不是跨越连线(与完整仪表盘一致) */
-    function padGaps(samples, intervalSec) {
+    /* 缺口补齐(与 dashboard.html 的缺口逻辑同源,见该处注释):
+     * 固定时间窗口内,前导/中间/尾部缺失时段都按采样节拍补 null 空点——
+     * 本面板按数组下标画 x 坐标,必须补点才能让"缺失时段留空"而非压缩时间轴。 */
+    function padGaps(samples, intervalSec, windowMs) {
         var stepMs = Math.max(1, intervalSec) * 1000;  // 防 ≤0 时循环永不前进、页面卡死
         function pad(n) { return (n < 10 ? '0' : '') + n; }
         function fmt(d) {
             return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
                 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
         }
+        function nullPoint(t) {
+            return { ts: fmt(new Date(t)), online: null, chatting: null, active: null, away: null, entering: null };
+        }
+        if (!samples.length) return [];
+        var nowMs = Date.now();
         var out = [];
+        // 前导空缺:窗口起点 → 首条样本(停机/未采集时段留空)
+        var firstTs = new Date(samples[0].ts).getTime();
+        var startMs = windowMs ? nowMs - windowMs : firstTs;
+        for (var t = startMs; t + stepMs <= firstTs; t += stepMs) out.push(nullPoint(t));
+        // 样本与样本之间的空缺(原逻辑)
         for (var i = 0; i < samples.length; i++) {
             out.push(samples[i]);
             if (i === samples.length - 1) break;
             var t0 = new Date(samples[i].ts).getTime();
             var t1 = new Date(samples[i + 1].ts).getTime();
             if (t1 - t0 > stepMs * 2) {
-                for (var t = t0 + stepMs; t + stepMs <= t1; t += stepMs) {
-                    out.push({ ts: fmt(new Date(t)), online: null, chatting: null, active: null, away: null, entering: null });
-                }
+                for (var tt = t0 + stepMs; tt + stepMs <= t1; tt += stepMs) out.push(nullPoint(tt));
             }
         }
+        // 尾部空缺:末条样本 → 当前时刻
+        var lastTs = new Date(samples[samples.length - 1].ts).getTime();
+        for (var tt = lastTs + stepMs; tt <= nowMs; tt += stepMs) out.push(nullPoint(tt));
         return out;
     }
 
@@ -553,15 +568,21 @@
         for (var t = 0; t < 4; t++) {
             var idx = Math.round((n - 1) * t / 3);
             var ts = data[idx].ts;
-            var label = ts ? (chartRange === '7d'
-                ? ts.slice(5, 16).replace('T', ' ')
+            var label = ts ? (chartRange === '7d' || chartRange === 'all'
+                ? ts.slice(5, 16).replace('T', ' ')  // 多天范围:显示日期+时间
                 : ts.slice(11, 16)) : '';
             ctx.fillText(label, padL + plotW * t / 3, cssH - padB + 4);
         }
     }
 
     function updateLegend() {
-        var latest = chartData && chartData.length ? chartData[chartData.length - 1] : null;
+        // 取最后一条真实样本(尾部补的空点是 null,不能当最新值)
+        var latest = null;
+        if (chartData && chartData.length) {
+            for (var i = chartData.length - 1; i >= 0; i--) {
+                if (chartData[i].online !== null) { latest = chartData[i]; break; }
+            }
+        }
         for (var i = 0; i < legendVals.length; i++) {
             legendVals[i].textContent = latest ? String(latest[KEYS[i]]) : '—';
         }
@@ -573,7 +594,8 @@
             .then(function (j) {
                 var iv = Number(j.interval_seconds);
                 chartInterval = iv > 0 ? iv : 60;  // ≤0/NaN 兜底:防 padGaps 死循环
-                chartData = padGaps(j.samples || [], chartInterval);
+                chartWindowMs = RANGE_MS[chartRange] || null;
+                chartData = padGaps(j.samples || [], chartInterval, chartWindowMs);
                 drawChart();
                 updateLegend();
             })

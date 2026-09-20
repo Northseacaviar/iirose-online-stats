@@ -5,7 +5,6 @@ import asyncio
 import logging
 import os
 import sys
-import time
 from collections.abc import Awaitable, Callable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -17,7 +16,7 @@ from collector.sampler import Sampler
 from collector.userlist import UserList
 from collector.ws_client import IIRoseClient
 from storage.db import Database
-from web.server import BrowserActivity, create_app
+from web.server import create_app
 
 ROOT = Path(__file__).resolve().parent
 
@@ -35,7 +34,6 @@ _DEFAULT_CONFIG = {
         "room": "5ce6a4b520a90",
     },
     "database": "data/iirose_stats.db",
-    "browser_idle_exit_minutes": 10,
 }
 
 
@@ -81,31 +79,13 @@ def setup_logging() -> None:
             maxBytes=5 * 1024 * 1024, backupCount=3,
         )
     ]
-    if sys.stdout is not None:  # pythonw(开关静默启动)下无控制台,只写文件
+    if sys.stdout is not None:  # pythonw(开机自启静默运行)下无控制台,只写文件
         handlers.append(logging.StreamHandler(sys.stdout))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=handlers,
     )
-
-
-async def idle_watchdog(activity: BrowserActivity, minutes: float) -> None:
-    """网页脚本模式:连续 minutes 分钟无上报 → 自动退出(判定页面已关闭)。
-
-    检查间隔随配置缩短,短配置(测试用)也能快速响应。
-    """
-    log = logging.getLogger("iirose")
-    while True:
-        await asyncio.sleep(min(15.0, minutes * 30.0))
-        idle = time.time() - activity.last_ingest
-        if idle >= minutes * 60:
-            log.warning(
-                "连续 %.1f 分钟无网页脚本上报,判定页面未打开,自动退出监测"
-                "(config.yaml browser_idle_exit_minutes=0 可改为常驻)",
-                idle / 60,
-            )
-            return
 
 
 async def _guarded(factory: Callable[[], Awaitable[None]], name: str) -> None:
@@ -160,15 +140,12 @@ async def main() -> None:
         sampler = None
 
     web_cfg = config["http"]
-    idle_minutes = _num(config.get("browser_idle_exit_minutes", 10), 10.0, 0.0)
-    activity = BrowserActivity() if (not ws_enabled and idle_minutes > 0) else None
     app = create_app(
         db,
         web_dir=ROOT / "web",
         anomaly_config=anomaly_cfg,
         js_dir=ROOT.parent / "browser-js",  # 网页 JS 唯一来源
         interval_seconds=interval_seconds,
-        activity=activity,
     )
     runner = web.AppRunner(app)
     await runner.setup()
@@ -177,22 +154,14 @@ async def main() -> None:
 
     log.info("仪表盘: http://%s:%d 采集间隔:%ds", web_cfg["host"], web_cfg["port"], config["interval_seconds"])
     tasks = []
-    watchdog_task = None
     if ws_enabled:
         log.info("WS 端点: wss://%s:%d(账号 %s)", ", ".join(ws_cfg["hosts"]), ws_cfg["port"], acct.get("username") or "(未配置)")
         tasks = [
             asyncio.create_task(_guarded(client.run, "ws-client"), name="ws-client"),
             asyncio.create_task(_guarded(sampler.run, "sampler"), name="sampler"),
         ]
-    elif activity is not None:
-        log.info(
-            "WS 采集已禁用(ws.enabled=false):数据仅来自网页 JS 脚本上报;"
-            "连续 %.0f 分钟无上报将自动退出",
-            idle_minutes,
-        )
-        watchdog_task = asyncio.create_task(idle_watchdog(activity, idle_minutes), name="idle-watchdog")
     else:
-        log.info("WS 采集已禁用(ws.enabled=false):数据仅来自网页 JS 脚本上报")
+        log.info("WS 采集已禁用(ws.enabled=false):数据仅来自网页 JS 脚本上报;服务常驻,打开网页即开始采集")
     try:
         if tasks:
             # _guarded 内部已重启兜底;仍以 return_exceptions 收尾,异常只记录不拖垮整个服务
@@ -200,8 +169,6 @@ async def main() -> None:
             for task, result in zip(tasks, results):
                 if isinstance(result, Exception):
                     log.error("任务 %s 以异常结束: %r", task.get_name(), result)
-        elif watchdog_task is not None:
-            await watchdog_task  # 空闲看门狗触发 → 优雅退出
         else:
             await asyncio.Event().wait()  # 只托管仪表盘与上报 API,常驻不退出
     finally:
@@ -209,8 +176,6 @@ async def main() -> None:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)  # 等任务真正退出再清理
-        if watchdog_task is not None:
-            watchdog_task.cancel()
         await runner.cleanup()
 
 

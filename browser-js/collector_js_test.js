@@ -248,30 +248,46 @@ eval(code);
     await flush();
     assert(seriesUrls.some((u) => u.includes('range=1h')), '点击 1h 切换图表范围');
     assert(seriesUrls.some((u) => u.includes('range=24h')), '打开面板默认拉取 24h');
+    panel.children[2].children[5]._listeners.click();
+    await flush();
+    assert(seriesUrls.some((u) => u.includes('range=all')), '点击全部切换图表范围');
 
-    /* 图表缺口:相邻样本间隔 > 2×采样间隔 → 补空点,曲线断开不跨缺口连线 */
+    /* 图表缺口:固定时间窗口内,前导/中间/尾部缺失时段都补空点(曲线断开、时间轴不压缩) */
+    const realNow = Date.now;
+    const NOW_MS = 1800000000000; // 固定时钟:断言可精确计算补点数量
+    Date.now = () => NOW_MS;
+    const pad2 = (n) => (n < 10 ? '0' : '') + n;
+    const fmtMs = (ms) => {
+        const d = new Date(ms);
+        return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+            'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+    };
     mockSeries = {
         interval_seconds: 60,
         samples: [
-            { ts: '2026-09-17T10:00:00', online: 100, chatting: 10, active: 20, away: 50, entering: 2 },
-            { ts: '2026-09-17T10:06:00', online: 110, chatting: 12, active: 22, away: 55, entering: 2 },
+            { ts: fmtMs(NOW_MS - 6 * 60000), online: 100, chatting: 10, active: 20, away: 50, entering: 2 },
+            { ts: fmtMs(NOW_MS), online: 110, chatting: 12, active: 22, away: 55, entering: 2 },
         ],
     };
-    panel.children[2].children[1]._listeners.click(); // 点 24h 重新拉取
+    panel.children[2].children[3]._listeners.click(); // 点 24h 重新拉取
     await flush();
     const info = window.iiroseStats.chartInfo();
-    assert(info.points === 7, '6 分钟缺口按 60s 节拍补 5 个空点(2 实 + 5 空)');
-    assert(info.gaps === 5, '空点标记为 null,曲线在缺口处断开');
+    const lead = (24 * 3600 - 6 * 60) / 60; // 24h 窗口内首条样本前的空点 = 1434
+    assert(info.points === lead + 2 + 5, `6 分钟缺口补 5 空点,窗口前导补 ${lead} 空点(2 实)`);
+    assert(info.gaps === lead + 5, '空点标记为 null,曲线在缺口处断开');
     mockSeries = {
         interval_seconds: 60,
         samples: [
-            { ts: '2026-09-17T10:00:00', online: 100, chatting: 10, active: 20, away: 50, entering: 2 },
-            { ts: '2026-09-17T10:01:00', online: 110, chatting: 12, active: 22, away: 55, entering: 2 },
+            { ts: fmtMs(NOW_MS - 60000), online: 100, chatting: 10, active: 20, away: 50, entering: 2 },
+            { ts: fmtMs(NOW_MS), online: 110, chatting: 12, active: 22, away: 55, entering: 2 },
         ],
     };
     panel.children[2].children[0]._listeners.click(); // 点 1h 重新拉取
     await flush();
-    assert(window.iiroseStats.chartInfo().gaps === 0, '连续数据(间隔=采样节拍)不补空点');
+    const info1h = window.iiroseStats.chartInfo();
+    const lead1h = (3600 - 60) / 60; // 1h 窗口前导 = 59
+    assert(info1h.gaps === lead1h, `连续数据只补窗口前导空点(${lead1h}),不补中间空点`);
+    Date.now = realNow;
 
     /* 完整仪表盘链接 */
     panel.children[0].children[1]._listeners.click({ stopPropagation() {} });
