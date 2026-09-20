@@ -142,6 +142,8 @@ tbody tr:nth-child(even) { background: color-mix(in srgb, var(--gridline) 35%, t
     <span style="font-size:13px;color:var(--muted)">时间范围</span>
     <div class="grp" id="rangeGrp">
       <button data-range="1h">1 小时</button>
+      <button data-range="3h">3 小时</button>
+      <button data-range="8h">8 小时</button>
       <button data-range="24h" class="active">24 小时</button>
       <button data-range="7d">7 天</button>
       <button data-range="all">全部</button>
@@ -180,6 +182,8 @@ let chart = null;
 let lastSamples = [];
 let lastDataTs = null;      // 上次轮询拿到的最新采样 ts:未变则不动 DOM/图表
 let lastRenderedTs = null;  // 图表当前绘制的最新 ts
+let lastWindowSec = null;   // 上次渲染用的固定时间窗口(秒),主题切换重绘时复用
+const RANGE_SECONDS = { "1h": 3600, "3h": 3 * 3600, "8h": 8 * 3600, "24h": 86400, "7d": 7 * 86400, "all": null };
 
 /* ?theme=dark|light 便于无头验证/快速切换 */
 const themeParam = new URLSearchParams(location.search).get("theme");
@@ -206,12 +210,12 @@ document.getElementById("themeBtn").addEventListener("click", () => {
   document.documentElement.dataset.theme = effectiveDark() ? "light" : "dark";
   syncThemeBtn();
   initChart();
-  renderChart(lastSamples, true);
+  renderChart(lastSamples, true, lastWindowSec);
 });
 osDark.addEventListener("change", () => {
   if (!document.documentElement.dataset.theme) {
     initChart();
-    renderChart(lastSamples, true);
+    renderChart(lastSamples, true, lastWindowSec);
   }
 });
 syncThemeBtn();
@@ -271,7 +275,8 @@ function seriesOption(samples) {
   }));
 }
 
-/* 与 browser-js/collector.js 中的 padGaps 保持同步,两处需同时修改!
+/* 与 browser-js/collector.js 中的 padGaps 同源(那里按数组下标绘制,必须补前导/尾部空点;
+ * 本页用 echarts,前导/尾部缺失由固定坐标轴窗口呈现,这里只补样本间的空点,两处逻辑需同步修改)。
  * 按采样间隔重建时间线:相邻样本间隔 > 2 个节拍时,中间补 null 点。
  * 停机/断连期间的缺失在图上显示为明确的断口,而不是一条横跨缺口的斜线。 */
 function padGaps(samples, intervalSec) {
@@ -300,7 +305,7 @@ function initChart() {
   chart = echarts.init(dom, null, { renderer: "canvas" });
 }
 
-function renderChart(samples, force) {
+function renderChart(samples, force, windowSec) {
   lastSamples = samples;
   const lastTs = samples.length ? samples[samples.length - 1].ts : null;
   // 无新数据时跳过重绘(轮询比采样频繁,5/6 的轮询是空跑)
@@ -311,8 +316,14 @@ function renderChart(samples, force) {
   empty.style.display = samples.length ? "none" : "flex";
   dom.style.display = samples.length ? "block" : "none";
   if (samples.length) {
+    const option = { ...baseOption(), animation: lastRenderedTs === null, series: seriesOption(samples) };
+    if (windowSec) {
+      lastWindowSec = windowSec;
+      // 固定时间窗口:横轴始终显示 [now-窗口, now],缺失时段显示为空缺,不压缩到有数据的部分
+      option.xAxis = { ...option.xAxis, min: new Date(Date.now() - windowSec * 1000), max: new Date() };
+    }
     // 动画只播首次(此后每秒刷新都瞬时重绘,避免长列表反复播动画造成卡顿)
-    chart.setOption({ ...baseOption(), animation: lastRenderedTs === null, series: seriesOption(samples) }, true);
+    chart.setOption(option, true);
     lastRenderedTs = lastTs;
   }
 }
@@ -331,7 +342,7 @@ async function refresh(force) {
     const intervalSec = Number.isFinite(interval_seconds) && interval_seconds > 0 ? interval_seconds : 60;
     document.querySelector(".sub").textContent =
       `全站数据 · 每 ${Math.round(intervalSec)} 秒采样(可在 config.yaml 修改)`;
-    renderChart(padGaps(samples, intervalSec), force);
+    renderChart(padGaps(samples, intervalSec), force, RANGE_SECONDS[currentRange] ?? null);
 
     const { sample } = await latestResp.json();
     if (sample) {

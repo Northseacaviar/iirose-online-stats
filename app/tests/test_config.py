@@ -37,7 +37,7 @@ def test_num_validation():
     assert _num(0, 60.0, 1.0) == 60.0       # ≤0 退回默认
     assert _num(-5, 60.0, 1.0) == 60.0
     assert _num("garbage", 60.0, 1.0) == 60.0
-    assert _num(0, 10.0, 0.0) == 0.0        # 允许 0 的场景(常驻模式)
+    assert _num(0, 10.0, 0.0) == 0.0        # 下限为 0 时允许 0
 
 
 if __name__ == "__main__":

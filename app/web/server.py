@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -15,6 +14,8 @@ from storage.db import Database
 # 时间范围参数 → 回溯时长(秒)
 _RANGES = {
     "1h": 3600,
+    "3h": 3 * 3600,
+    "8h": 8 * 3600,
     "24h": 86400,
     "7d": 7 * 86400,
     "all": None,
@@ -26,17 +27,6 @@ _ALLOWED_ORIGINS = {"https://iirose.com", "https://www.iirose.com"}
 
 # 单样本数值上限:在线人数不可能达到的量级,同时防 sqlite 整数溢出
 _MAX_SAMPLE_VALUE = 1_000_000_000
-
-
-class BrowserActivity:
-    """网页上报活跃度:记录最近一次有效上报的时间戳。
-
-    网页脚本模式(ws.enabled=false)下,程序靠它判断页面是否还开着:
-    连续若干分钟无上报 → 自动退出(browser_idle_exit_minutes)。
-    """
-
-    def __init__(self) -> None:
-        self.last_ingest = time.time()  # 启动即视为刚活跃,给用户打开页面的时间
 
 
 @web.middleware
@@ -67,7 +57,6 @@ def create_app(
     anomaly_config: dict | None = None,
     js_dir: Path | None = None,
     interval_seconds: float = 60,
-    activity: BrowserActivity | None = None,
 ) -> web.Application:
     app = web.Application(middlewares=[cors_private_network])
     anomaly_cfg = anomaly_config or {}
@@ -133,8 +122,6 @@ def create_app(
         since = (datetime.now() - timedelta(seconds=window)).strftime("%Y-%m-%dT%H:%M:%S")
         recent = await asyncio.to_thread(db.query, since)
         reason = reject_reason(dict(zip(keys, values)), recent, anomaly_cfg)
-        if activity is not None:
-            activity.last_ingest = time.time()  # 页面还开着(样本被剔除也算活跃)
         if reason:
             log.warning("浏览器上报异常,已剔除(%s)", reason)
             return web.json_response({"ok": True, "written": False, "rejected": reason})
