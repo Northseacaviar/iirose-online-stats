@@ -1,0 +1,2 @@
+# 提交门禁脚本必须保持 LF 行尾(git for Windows 默认 autocrlf 会转 CRLF,导致 sh 执行异常)
+.githooks/* text eol=lf

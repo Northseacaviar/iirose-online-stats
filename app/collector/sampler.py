@@ -71,7 +71,13 @@ class Sampler:
             stats = self.client.userlist.compute_stats()
             ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
             recent = await asyncio.to_thread(self._recent_samples, ts)
-            reason = reject_reason(stats, recent, self.anomaly_config)
+            # anomaly 配置写坏(如阈值写成字符串)会让比较抛 TypeError,
+            # 进而被 _guarded 每 5 秒重启一次、采样停滞;此处降级为不做异常检测
+            try:
+                reason = reject_reason(stats, recent, self.anomaly_config)
+            except (TypeError, ValueError):
+                self.log.warning("anomaly 配置无效,跳过异常检测,直接入库")
+                reason = None
             if reason:
                 self.log.warning(
                     "采样异常,已剔除 online=%d chatting=%d active=%d away=%d entering=%d(%s)",
