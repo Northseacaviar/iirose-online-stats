@@ -40,6 +40,29 @@ class Sampler:
         ).strftime("%Y-%m-%dT%H:%M:%S")
         return self.db.query(since)
 
+    def _insert(self, ts: str, stats: dict) -> None:
+        """入库,并在距上次入库超过 2 个采样间隔时警告数据缺失。
+
+        每次写库前对比库中最新样本:开机(程序未运行)与断连恢复的缺失
+        都会被同一条规则覆盖——警告后即写入新样本,下一轮对比自然刷新。
+        """
+        last = self.db.latest()
+        if last is not None:
+            gap = datetime.fromisoformat(ts) - datetime.fromisoformat(last["ts"])
+            if gap > timedelta(seconds=self.interval * 2):
+                self.log.warning(
+                    "距上次采样已隔 %.0f 分钟(%s → %s),期间数据缺失(停机或断连)",
+                    gap.total_seconds() / 60, last["ts"], ts,
+                )
+        self.db.insert_sample(
+            ts,
+            stats["online"],
+            stats["chatting"],
+            stats["active"],
+            stats["away"],
+            stats["entering"],
+        )
+
     async def run(self) -> None:
         while True:
             await asyncio.sleep(self.interval)
@@ -57,15 +80,7 @@ class Sampler:
                 )
                 continue
             try:
-                await asyncio.to_thread(
-                    self.db.insert_sample,
-                    ts,
-                    stats["online"],
-                    stats["chatting"],
-                    stats["active"],
-                    stats["away"],
-                    stats["entering"],
-                )
+                await asyncio.to_thread(self._insert, ts, stats)
                 self.log.info(
                     "采样 %s online=%d chatting=%d active=%d away=%d entering=%d",
                     ts, stats["online"], stats["chatting"], stats["active"],

@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS samples (
 );
 """
 
+# samples 表列名(查询结果 → dict 的键)
+_KEYS = ("ts", "online", "chatting", "active", "away", "entering")
+
 
 class Database:
     def __init__(self, path: str | Path) -> None:
@@ -47,6 +50,10 @@ class Database:
             return cur.rowcount > 0
 
     def query(self, since_ts: str | None = None, limit: int | None = None) -> list[dict]:
+        """查询样本(时间升序)。
+
+        since_ts: 只取时间戳 >= 该值的样本;limit: 最多返回条数。
+        """
         sql = "SELECT ts, online, chatting, active, away, entering FROM samples"
         params: tuple = ()
         if since_ts is not None:
@@ -58,10 +65,10 @@ class Database:
             params += (limit,)
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
-        keys = ("ts", "online", "chatting", "active", "away", "entering")
-        return [dict(zip(keys, row)) for row in rows]
+        return [dict(zip(_KEYS, row)) for row in rows]
 
     def latest(self) -> dict | None:
+        """最新一条样本;库为空时返回 None。"""
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT ts, online, chatting, active, away, entering FROM samples "
@@ -69,5 +76,4 @@ class Database:
             ).fetchone()
         if row is None:
             return None
-        keys = ("ts", "online", "chatting", "active", "away", "entering")
-        return dict(zip(keys, row))
+        return dict(zip(_KEYS, row))

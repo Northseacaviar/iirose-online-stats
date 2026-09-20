@@ -58,8 +58,26 @@ def test_ingest_preflight_has_cors_and_pna_headers(tmp_path):
                 },
             )
             assert resp.status == 204
-            assert resp.headers["Access-Control-Allow-Origin"] == "*"
+            # 白名单来源:回显 Origin(不再是无差别放行的 *)
+            assert resp.headers["Access-Control-Allow-Origin"] == "https://iirose.com"
             assert resp.headers["Access-Control-Allow-Private-Network"] == "true"
+    asyncio.run(run())
+
+
+def test_cors_rejects_foreign_origin(tmp_path):
+    """白名单外的网页不应拿到 CORS 头,浏览器会拦截其跨域请求。"""
+    async def run():
+        db = Database(tmp_path / "t.db")
+        async with _client(db) as cli:
+            resp = await cli.options(
+                "/api/ingest",
+                headers={
+                    "Origin": "https://evil.example.com",
+                    "Access-Control-Request-Method": "POST",
+                },
+            )
+            assert resp.status == 204
+            assert "Access-Control-Allow-Origin" not in resp.headers
     asyncio.run(run())
 
 
@@ -74,6 +92,25 @@ def test_ingest_rejects_bad_payload(tmp_path):
                                      "away": 0, "entering": 0}
             )
             assert r1.status == 400 and r2.status == 400 and r3.status == 400
+        assert db.latest() is None
+    asyncio.run(run())
+
+
+def test_ingest_rejects_invalid_number_types(tmp_path):
+    """小数(防静默截断)、bool(防当 1)、字符串、超大整数(防 sqlite 溢出)一律拒绝。"""
+    async def run():
+        db = Database(tmp_path / "t.db")
+        base = dict(SAMPLE)
+        cases = [
+            {**base, "online": 1.9},
+            {**base, "online": True},
+            {**base, "online": "156"},
+            {**base, "online": 10**12},
+        ]
+        async with _client(db) as cli:
+            for payload in cases:
+                resp = await cli.post("/api/ingest", json=payload)
+                assert resp.status == 400, payload
         assert db.latest() is None
     asyncio.run(run())
 
