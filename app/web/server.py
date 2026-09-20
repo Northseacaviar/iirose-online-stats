@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -102,16 +103,25 @@ def create_app(
             payload = await request.json()
         except Exception:
             return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+        if not isinstance(payload, dict):  # list/字符串载荷:payload[k] 会抛 TypeError→500
+            return web.json_response({"ok": False, "error": "bad fields"}, status=400)
         keys = ("online", "chatting", "active", "away", "entering")
         try:
             raw = [payload[k] for k in keys]
-        except KeyError:
+        except (KeyError, TypeError):
             return web.json_response({"ok": False, "error": "bad fields"}, status=400)
-        # 严格校验:拒绝 bool(True 会被 int() 当 1)和小数(int(1.9) 静默截断为 1)
-        if any(
-            isinstance(v, bool) or not isinstance(v, (int, float)) or float(v) != int(v)
-            for v in raw
-        ):
+        # 严格校验:拒绝 bool(True 会被 int() 当 1)、小数(int(1.9) 静默截断为 1)、
+        # NaN/Infinity(json 标准字面量,int() 会抛 ValueError→500)
+        def _bad(v) -> bool:
+            if isinstance(v, bool):
+                return True
+            if isinstance(v, int):
+                return False
+            if isinstance(v, float):
+                return not math.isfinite(v) or v != int(v)
+            return True
+
+        if any(_bad(v) for v in raw):
             return web.json_response({"ok": False, "error": "bad fields"}, status=400)
         values = [int(v) for v in raw]
         if any(v < 0 or v > _MAX_SAMPLE_VALUE for v in values):

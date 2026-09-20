@@ -1,6 +1,11 @@
 # ==== 敏感文件:禁止入库(凭据)====
 app/config.yaml
 config.yaml
+.env
+*.env
+*.key
+*.pem
+*.p12
 
 # ==== 运行时数据与日志 ====
 app/data/
@@ -12,3 +17,10 @@ logs/
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# ==== 提交门禁 ====
+.checks/
+
+# ==== 本地报告产物 ====
+test-report.md

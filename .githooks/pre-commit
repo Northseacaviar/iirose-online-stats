@@ -1,0 +1,67 @@
+#!/bin/sh
+# ============================================================
+# 质量门禁(pre-commit):提交前验证检查标记
+#
+# 标记由 tester(unit-test)与 quality-engineer(quality)产出:
+#   .checks/unit-test.json + .checks/unit-test.files
+#   .checks/quality.json    + .checks/quality.files
+#
+# 放行条件(全部满足):
+#   1. 两个标记文件存在
+#   2. 标记内 status = pass
+#   3. 内容指纹与当前工作树逐字节一致(防"检查后偷改代码再提交")
+#
+# 逃生门(知情跳过):git commit --no-verify
+#
+# ⚠ 指纹算法与 tester.md / quality-engineer.md 中的版本重复(共 3 处),
+#   修改算法时必须三处同步。
+# ============================================================
+
+root=$(git rev-parse --show-toplevel)
+checks="$root/.checks"
+
+# fail <原因>
+# 作用:打印拦截提示并以退出码 1 中止提交(标记缺失/未通过/指纹过期)
+# 参数:$1 = 拦截原因(内部固定文案,非外部输入)
+# 返回:无(直接 exit 1)
+fail() {
+  echo ""
+  echo "✗ 提交被拦截:$1" >&2
+  echo "  请运行 gitcommit-agent(或依次运行 tester、quality-engineer)完成检查后重试。" >&2
+  echo "  确知无需检查时可跳过:git commit --no-verify" >&2
+  exit 1
+}
+
+# 1. 两个标记必须存在且为 pass
+for kind in unit-test quality; do
+  [ -f "$checks/$kind.json" ] || fail "缺少检查标记 .checks/$kind.json"
+  # 先去空白再精确匹配(pass 后必须紧跟 , 或 }):
+  # 防 "passed"、fail 标记的 summary 含相似子串被误放行
+  tr -d '[:space:]' < "$checks/$kind.json" | grep -Eq '"status":"pass"(,|})' \
+    || fail "检查未通过($kind):$(grep -o '"summary":"[^"]*"' "$checks/$kind.json" | head -1)"
+done
+
+# 2. 内容指纹比对:标记记录检查时的文件哈希,提交时须逐字节一致
+#    文件集 = 全部已跟踪文件 + 未被忽略的未跟踪文件;哈希取工作树内容
+{
+  git ls-files
+  git ls-files --others --exclude-standard
+} | sort -u | while IFS= read -r f; do
+  if [ -f "$f" ]; then
+    h=$(git hash-object -- "$f")
+  else
+    h="deleted"
+  fi
+  printf '%s  %s\n' "$h" "$f"
+done | sort > "$checks/.fingerprint.now"
+
+for kind in unit-test quality; do
+  if ! diff -q "$checks/$kind.files" "$checks/.fingerprint.now" >/dev/null 2>&1; then
+    rm -f "$checks/.fingerprint.now"
+    fail "检查($kind)后代码有改动,标记已过期,请重新运行检查"
+  fi
+done
+rm -f "$checks/.fingerprint.now"
+
+echo "✓ 质量门禁通过:单元测试与质量检查标记均新鲜有效"
+exit 0

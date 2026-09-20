@@ -53,6 +53,13 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def load_config(path: Path) -> dict:
+    """加载 YAML 配置并与内置默认值深合并。
+
+    path: 配置文件路径;不存在时返回纯默认配置(不报错)。
+    返回: 合并后的配置 dict(用户字段覆盖默认值,子 dict 逐键合并)。
+    异常: yaml.safe_load 解析失败会向上抛出(配置写坏应快速失败而非带病启动);
+    空文件返回 {} 以安全合并。
+    """
     config = dict(_DEFAULT_CONFIG)
     if path.exists():
         with open(path, encoding="utf-8") as f:

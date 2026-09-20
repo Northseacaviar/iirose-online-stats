@@ -96,6 +96,34 @@ def test_ingest_rejects_bad_payload(tmp_path):
     asyncio.run(run())
 
 
+def test_ingest_rejects_non_dict_payloads(tmp_path):
+    """list/字符串载荷:payload[k] 此前抛 TypeError→500,修复后应 400 bad fields。"""
+    async def run():
+        db = Database(tmp_path / "t.db")
+        async with _client(db) as cli:
+            for payload in ([1, 2, 3], "hello", [{"online": 1}]):
+                resp = await cli.post("/api/ingest", json=payload)
+                body = await resp.json()
+                assert resp.status == 400, payload
+                assert body["error"] == "bad fields", payload
+        assert db.latest() is None
+    asyncio.run(run())
+
+
+def test_ingest_rejects_non_finite_numbers(tmp_path):
+    """NaN/Infinity(json 标准字面量)此前 int() 抛 ValueError→500,应 400 bad fields。"""
+    async def run():
+        db = Database(tmp_path / "t.db")
+        async with _client(db) as cli:
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                resp = await cli.post("/api/ingest", json={**SAMPLE, "online": bad})
+                body = await resp.json()
+                assert resp.status == 400, bad
+                assert body["error"] == "bad fields", bad
+        assert db.latest() is None
+    asyncio.run(run())
+
+
 def test_ingest_rejects_invalid_number_types(tmp_path):
     """小数(防静默截断)、bool(防当 1)、字符串、超大整数(防 sqlite 溢出)一律拒绝。"""
     async def run():

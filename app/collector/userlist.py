@@ -11,8 +11,6 @@ Online = 用户列表总长度。
 """
 from __future__ import annotations
 
-import html
-
 # 状态字符 → 桶下标(与客户端 d[] 数组下标一致)
 _STATUS_BUCKET = {"": 10, "*": 11, "a": 12}
 _DIGITS = set("0123456789")
