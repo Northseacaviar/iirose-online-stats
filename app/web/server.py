@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -19,22 +20,44 @@ _RANGES = {
     "all": None,
 }
 
+# 跨域白名单:上报脚本只在 iirose 页面注入,其余来源一律不放行
+# (任意其他网页不得读写本机接口,防统计库投毒)
+_ALLOWED_ORIGINS = {"https://iirose.com", "https://www.iirose.com"}
+
+# 单样本数值上限:在线人数不可能达到的量级,同时防 sqlite 整数溢出
+_MAX_SAMPLE_VALUE = 1_000_000_000
+
+
+class BrowserActivity:
+    """网页上报活跃度:记录最近一次有效上报的时间戳。
+
+    网页脚本模式(ws.enabled=false)下,程序靠它判断页面是否还开着:
+    连续若干分钟无上报 → 自动退出(browser_idle_exit_minutes)。
+    """
+
+    def __init__(self) -> None:
+        self.last_ingest = time.time()  # 启动即视为刚活跃,给用户打开页面的时间
+
 
 @web.middleware
 async def cors_private_network(request: web.Request, handler):
-    """CORS + Chrome Private Network Access:允许 iirose(https)页面向本机上报。
+    """CORS + Chrome Private Network Access:仅放行 iirose(https)页面向本机上报。
 
     页面是公网 HTTPS,POST 到 http://127.0.0.1 属私有网络请求,预检需回
     `Access-Control-Allow-Private-Network: true` 才放行;OPTIONS 由中间件直接应答。
+    Origin 白名单外的一律不回 CORS 头,浏览器会拦截其跨域请求;
+    本机同源请求(仪表盘/测试)不带 Origin,不受影响。
     """
     if request.method == "OPTIONS":
         resp = web.Response(status=204)
     else:
         resp = await handler(request)
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    resp.headers["Access-Control-Allow-Private-Network"] = "true"
+    origin = request.headers.get("Origin")
+    if origin in _ALLOWED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Allow-Private-Network"] = "true"
     return resp
 
 
@@ -43,6 +66,8 @@ def create_app(
     web_dir: Path,
     anomaly_config: dict | None = None,
     js_dir: Path | None = None,
+    interval_seconds: float = 60,
+    activity: BrowserActivity | None = None,
 ) -> web.Application:
     app = web.Application(middlewares=[cors_private_network])
     anomaly_cfg = anomaly_config or {}
@@ -52,8 +77,11 @@ def create_app(
         """浏览器侧上报脚本(browser-js/ 目录是唯一来源)。
 
         /js/collector.js 为规范地址;保留 /static/collector.js 兼容旧配置。
+        no-cache:脚本常更新,强制每次页面加载重新校验,避免浏览器拿到旧版。
         """
-        return web.FileResponse(js_dir / "collector.js")
+        return web.FileResponse(
+            js_dir / "collector.js", headers={"Cache-Control": "no-cache"}
+        )
 
     async def index(_request: web.Request) -> web.StreamResponse:
         return web.FileResponse(web_dir / "dashboard.html")
@@ -67,7 +95,10 @@ def create_app(
                 "%Y-%m-%dT%H:%M:%S"
             )
         rows = await asyncio.to_thread(db.query, since)
-        return web.json_response({"range": rng, "samples": rows})
+        # interval_seconds 供前端按采样节拍重建时间线、显示数据缺口
+        return web.json_response(
+            {"range": rng, "samples": rows, "interval_seconds": interval_seconds}
+        )
 
     async def api_latest(_request: web.Request) -> web.Response:
         row = await asyncio.to_thread(db.latest)
@@ -84,17 +115,26 @@ def create_app(
             return web.json_response({"ok": False, "error": "invalid json"}, status=400)
         keys = ("online", "chatting", "active", "away", "entering")
         try:
-            values = [int(payload[k]) for k in keys]
-        except (KeyError, TypeError, ValueError):
+            raw = [payload[k] for k in keys]
+        except KeyError:
             return web.json_response({"ok": False, "error": "bad fields"}, status=400)
-        if any(v < 0 for v in values):
-            return web.json_response({"ok": False, "error": "negative values"}, status=400)
+        # 严格校验:拒绝 bool(True 会被 int() 当 1)和小数(int(1.9) 静默截断为 1)
+        if any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) or float(v) != int(v)
+            for v in raw
+        ):
+            return web.json_response({"ok": False, "error": "bad fields"}, status=400)
+        values = [int(v) for v in raw]
+        if any(v < 0 or v > _MAX_SAMPLE_VALUE for v in values):
+            return web.json_response({"ok": False, "error": "out of range"}, status=400)
         ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         # 异常检测:偏离自身近窗口内均值过大的样本剔除(脚本更新/断连等)
         window = anomaly_cfg.get("window_seconds", DEFAULT_CONFIG["window_seconds"])
         since = (datetime.now() - timedelta(seconds=window)).strftime("%Y-%m-%dT%H:%M:%S")
         recent = await asyncio.to_thread(db.query, since)
         reason = reject_reason(dict(zip(keys, values)), recent, anomaly_cfg)
+        if activity is not None:
+            activity.last_ingest = time.time()  # 页面还开着(样本被剔除也算活跃)
         if reason:
             log.warning("浏览器上报异常,已剔除(%s)", reason)
             return web.json_response({"ok": True, "written": False, "rejected": reason})

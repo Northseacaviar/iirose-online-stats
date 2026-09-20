@@ -12,7 +12,6 @@ Online = 用户列表总长度。
 from __future__ import annotations
 
 import html
-from datetime import datetime
 
 # 状态字符 → 桶下标(与客户端 d[] 数组下标一致)
 _STATUS_BUCKET = {"": 10, "*": 11, "a": 12}
@@ -24,7 +23,6 @@ class UserList:
 
     def __init__(self) -> None:
         self._users: dict[str, list[str]] = {}
-        self.last_snapshot: datetime | None = None
 
     def __len__(self) -> int:
         return len(self._users)

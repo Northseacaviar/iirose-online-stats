@@ -258,6 +258,7 @@ function seriesOption(samples) {
     type: "line",
     data: samples.map((r) => [new Date(r.ts), r[s.key]]),
     showSymbol: false,
+    connectNulls: false, // 缺失时段断线显示,不画误导性的跨越连线
     lineStyle: { width: 2 },
     emphasis: { lineStyle: { width: 3 } },
     endLabel: {
@@ -268,6 +269,29 @@ function seriesOption(samples) {
       distance: 8,
     },
   }));
+}
+
+/* 与 browser-js/collector.js 中的 padGaps 保持同步,两处需同时修改!
+ * 按采样间隔重建时间线:相邻样本间隔 > 2 个节拍时,中间补 null 点。
+ * 停机/断连期间的缺失在图上显示为明确的断口,而不是一条横跨缺口的斜线。 */
+function padGaps(samples, intervalSec) {
+  const stepMs = Math.max(1, intervalSec) * 1000; // 防 ≤0 时循环永不前进、页面卡死
+  const pad = (n) => String(n).padStart(2, "0");
+  const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const out = [];
+  for (let i = 0; i < samples.length; i++) {
+    out.push(samples[i]);
+    if (i === samples.length - 1) break;
+    const t0 = new Date(samples[i].ts).getTime();
+    const t1 = new Date(samples[i + 1].ts).getTime();
+    if (t1 - t0 > stepMs * 2) {
+      for (let t = t0 + stepMs; t + stepMs <= t1; t += stepMs) {
+        out.push({ ts: fmt(new Date(t)), online: null, chatting: null, active: null, away: null, entering: null });
+      }
+    }
+  }
+  return out;
 }
 
 function initChart() {
@@ -300,11 +324,14 @@ async function refresh(force) {
       fetch(`/api/series?range=${currentRange}`),
       fetch("/api/latest"),
     ]);
-    const { samples } = await seriesResp.json();
+    const { samples, interval_seconds } = await seriesResp.json();
     const lastTs = samples.length ? samples[samples.length - 1].ts : null;
     if (!force && lastTs !== null && lastTs === lastDataTs) return; // 采样未变,不动 DOM
     lastDataTs = lastTs;
-    renderChart(samples, force);
+    const intervalSec = Number.isFinite(interval_seconds) && interval_seconds > 0 ? interval_seconds : 60;
+    document.querySelector(".sub").textContent =
+      `全站数据 · 每 ${Math.round(intervalSec)} 秒采样(可在 config.yaml 修改)`;
+    renderChart(padGaps(samples, intervalSec), force);
 
     const { sample } = await latestResp.json();
     if (sample) {
@@ -314,8 +341,19 @@ async function refresh(force) {
 
     const tbody = document.getElementById("tbody");
     const rows = samples.slice(-100).reverse();
-    tbody.innerHTML = rows.map((r) => `<tr><td>${r.ts.replace("T", " ").slice(5, 19)}</td>` +
-      SERIES.map((s) => `<td>${r[s.key]}</td>`).join("") + "</tr>").join("");
+    // 用 DOM API + textContent 构建,数据即使将来混入字符串也不会被当 HTML 解析(XSS 防护)
+    tbody.replaceChildren(...rows.map((r) => {
+      const tr = document.createElement("tr");
+      const tdTime = document.createElement("td");
+      tdTime.textContent = r.ts.replace("T", " ").slice(5, 19);
+      tr.appendChild(tdTime);
+      for (const s of SERIES) {
+        const td = document.createElement("td");
+        td.textContent = r[s.key];
+        tr.appendChild(td);
+      }
+      return tr;
+    }));
   } catch (e) {
     document.getElementById("updatedAt").textContent = "刷新失败,稍后重试";
   }

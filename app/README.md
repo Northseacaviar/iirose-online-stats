@@ -19,9 +19,12 @@ python -m venv .venv
 
 浏览器打开 <http://127.0.0.1:8080> 查看走势图。
 
+- **一键开关**:双击项目根目录或桌面上的 `监测开关.bat` —— 未运行=启动,运行中=停止(以 8080 端口判断;临时停/开不用再开任务管理器)
 - 图表:5 条曲线 + 图例 + 十字线提示 + 最新值端标签;时间范围 1 小时 / 24 小时 / 7 天 / 全部;深浅主题跟随系统,右上角可手动切换;页面底部有数据明细表
 - 数据文件:`data/iirose_stats.db`(SQLite,`samples` 表)
 - 日志:`logs/collector.log`(控制台同步输出)
+
+**开关与网页联动(当前模式)**:开机自启已移除。想监测时双击项目根目录或桌面上的 `监测开关.bat` 启动(后台静默、无窗口);程序连续收不到网页脚本上报满 `browser_idle_exit_minutes`(默认 10 分钟)会自动退出,判定为页面已关闭——「打开网页 = 监测,关掉网页 = 自动停」。想恢复常驻:config.yaml 设 `browser_idle_exit_minutes: 0`;想恢复开机自启:把 `app/autostart.vbs` 复制到 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`。注意:程序已在运行时不要双击 start.bat 或开关重复启动(第二个实例会因端口占用自动退出)。
 
 ## 配置(config.yaml)
 
@@ -29,8 +32,10 @@ python -m venv .venv
 |---|---|
 | `interval_seconds` | 采样间隔秒数,默认 60 |
 | `http.host` / `http.port` | 仪表盘监听地址与端口 |
+| `ws.enabled` | `true` = 本地 WS 采集(需要 account);`false` = **只接收网页 JS 脚本上报**(程序仅托管仪表盘与入库,不登录 WS,页面不开则无数据) |
+| `browser_idle_exit_minutes` | 网页脚本模式(`ws.enabled: false`)专属:连续多少分钟无上报就自动退出(页面关闭后程序自停);`0` = 常驻不退出 |
 | `ws.hosts` / `ws.port` | WebSocket 主机列表与端口(线上 = wss 443) |
-| `account.username` / `password` | **登录账号**(必填,仅存本机;统计是全站的,任意账号/房间均可) |
+| `account.username` / `password` | **登录账号**(必填,仅存本机;统计是全站的,任意账号/房间均可)。加固选项:设置环境变量 `IIROSE_PASSWORD` 可覆盖配置文件中的密码,config.yaml 里可不存明文 |
 | `account.room` | 登录后进入的房间(空间站 `5ce6a4b520a90` 恒可用) |
 | `database` | SQLite 文件路径 |
 | `anomaly` | 异常检测:见下 |
@@ -56,6 +61,14 @@ python -m venv .venv
 **停用**:终端 `js -s` 关闭开关,或刷新后弹窗点移除。
 
 悬浮窗、面板交互与脚本配置见 [../browser-js/README.md](../browser-js/README.md)。
+
+## 数据缺失与恢复
+
+停机/断连期间**不写任何数据**(不补零、不插值——iirose 无历史接口,缺失时段的真实值无法事后补回,只能诚实留空):
+
+- **图表断口**:仪表盘按采样间隔重建时间线,缺失处插入空点,曲线在缺口处断开而不是画误导性的跨越连线
+- **日志警告**:恢复采样的第一条入库前,若距上次入库超过 2 个采样间隔,日志与终端输出 `距上次采样已隔 X 分钟(…),期间数据缺失(停机或断连)`
+- **WS 断连兜底**:浏览器备胎脚本(见上节)在你页面开着时持续上报,WS 断连期间的缺口基本被补上;电脑关机则无解,减少损失靠开机自启
 
 ## 工作原理
 

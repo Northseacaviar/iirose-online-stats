@@ -22,7 +22,17 @@ def _fingerprint() -> str:
 
 
 def build_login(username: str, password: str, room: str = DEFAULT_ROOM) -> str:
-    """注册账号登录包:`*` + JSON(md5 密码)。"""
+    """注册账号登录包:`*` + JSON(md5 密码)。
+
+    字段对照(网页客户端实测,与站点登录流程一致):
+    - r  房间 ID(全站统计,任意可用房间均可)
+    - n  用户名
+    - p  密码的 md5 十六进制(站点协议要求,网页登录同款)
+    - st "n" 表示账号登录
+    - mo / mb 空串(未知用途,网页客户端同样为空)
+    - mu "01"(未知用途,网页客户端同样为 01)
+    - fp "@"+32 位随机小写字母数字(实测站点接受任意随机值)
+    """
     packet = {
         "r": room,
         "n": username,

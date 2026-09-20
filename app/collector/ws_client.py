@@ -1,13 +1,13 @@
-"""iirose WebSocket 客户端:连接、游客登录、心跳、收包分发、断线重连。
+"""iirose WebSocket 客户端:连接、账号登录、心跳、收包分发、断线重连。
 
 参考 iirosebot ws_iirose/ws.py 的主机轮询 + 退避重连。
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import logging
-from datetime import datetime
 
 import websockets
 
@@ -52,6 +52,9 @@ class IIRoseClient:
 
     async def run(self) -> None:
         """常驻运行:连接失败/断开 → 退避重连,主机轮询。"""
+        if not self.hosts:
+            self.log.error("ws.hosts 未配置,采集器退出(请检查 config.yaml)")
+            return
         backoff = 5.0
         host_index = 0
         while True:
@@ -91,6 +94,9 @@ class IIRoseClient:
                     await self._handle_frame(ws, raw)
             finally:
                 self._hb_task.cancel()
+                # 等待心跳任务真正结束:避免遗留"Task exception was never retrieved"警告
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._hb_task
 
     async def _heartbeat(self, ws) -> None:
         """每 2s 发 `c`(网页客户端唯一保活方式)。"""
@@ -112,7 +118,6 @@ class IIRoseClient:
             records = parse_snapshot(text)
             if records:
                 self.userlist.rebuild(records)
-                self.userlist.last_snapshot = datetime.now()
                 self.has_data = True
                 self.log.info("快照更新:%d 名在线用户", len(records))
             else:

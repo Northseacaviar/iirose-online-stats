@@ -40,11 +40,14 @@ def reject_reason(
     violations = []
     for key in METRICS:
         th = thresholds.get(key)
-        if th is None:
+        if not isinstance(th, dict):
             continue
+        abs_th, rel_th = th.get("abs"), th.get("rel")
+        if abs_th is None or rel_th is None:
+            continue  # 阈值配置不完整时跳过该指标:配置改坏不致崩溃
         mean = sum(r[key] for r in recent) / len(recent)
         dev = abs(candidate[key] - mean)
-        if dev > max(th["abs"], th["rel"] * mean):
+        if dev > max(abs_th, rel_th * mean):
             violations.append(f"{key}={candidate[key]}(均值{mean:.0f},偏差{dev:.0f})")
     if len(violations) >= 2:
         return "; ".join(violations)
