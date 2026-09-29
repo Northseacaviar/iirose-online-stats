@@ -28,3 +28,5 @@ test-report.md
 # ==== 过程产物:只留本机,不入库 ====
 /docs/
 /app/docs/
+# 本机核算工具(含本机路径与会话库引用,对别人无用)
+tools/token-report.py
