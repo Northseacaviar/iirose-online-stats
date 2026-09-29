@@ -1,0 +1,10 @@
+{
+  "name": "koishi-plugin-iirose-stats-reporter",
+  "version": "0.1.0",
+  "description": "旁听 iirose 全站在线用户列表,算出人数与热度并上报给采集器",
+  "main": "index.js",
+  "license": "MIT",
+  "peerDependencies": {
+    "koishi": "^4.18.0"
+  }
+}

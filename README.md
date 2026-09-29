@@ -21,6 +21,8 @@ iirose-stats/
 │   ├── docs/产品文档.md     调研与设计文档
 │   ├── data/                数据文件(运行时)
 │   └── logs/                日志(运行时)
+├── deploy/                ← 服务器上用的 Koishi 上报插件
+│   └── koishi-plugin-iirose-stats-reporter/
 └── .venv/                  Python 虚拟环境(不入分享)
 ```
 
@@ -39,6 +41,18 @@ python -m venv .venv
 浏览器打开 <http://127.0.0.1:8080> 查看走势图。详见 [app/README.md](app/README.md)。
 
 网页 JS 的注入与分享说明见 [browser-js/README.md](browser-js/README.md)。
+
+## 两种取数方式
+
+| 方式 | 采集器配置 | 适用 |
+| --- | --- | --- |
+| 独立 WS 连接 | `ws.enabled: true` | 账号可以独占一个 WS 连接(默认) |
+| 由 Koishi 上报 | `ws.enabled: false` | 同一账号已由 Koishi 登录时 |
+
+第二种方式下采集器只收上报并提供仪表盘,数据由
+[deploy/koishi-plugin-iirose-stats-reporter](deploy/koishi-plugin-iirose-stats-reporter)
+借适配器现有的连接旁听全站列表后 POST 过来 —— 同一账号的第二个 WS 连接拿不到
+站方的业务数据。
 
 ## 测试
 
