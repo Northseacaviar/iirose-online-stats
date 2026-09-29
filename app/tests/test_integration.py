@@ -15,13 +15,14 @@ from collector.userlist import UserList
 from collector.ws_client import IIRoseClient
 from storage.db import Database
 
-# 快照用户:u1 状态9、u2 状态5、u3 状态4、u4 挂机""、u5 进入"*"
+# 快照用户:u1 状态9、u2 状态5、u3 状态4、u4 挂机""、u5 进入"*"、u7 A.I.("a")
 _SNAPSHOT_USERS = [
     "cartoon/1>1>u1>u1>roomA>0>>0>uid00000000001>0>0>9>0>0>0",
     "cartoon/1>1>u2>u2>roomA>0>>0>uid00000000002>0>0>5>0>0>0",
     "cartoon/1>1>u3>u3>roomB>0>>0>uid00000000003>0>0>4>0>0>0",
     "cartoon/1>1>u4>u4>roomB>0>>0>uid00000000004>0>0>>0>0>0",
     "cartoon/1>1>u5>u5>roomC>0>>0>uid00000000005>0>0>*>0>0>0",
+    "cartoon/1>1>u7>u7>roomC>0>>0>uid00000000008>0>0>a>0>0>0",
 ]
 _JOIN = "cartoon/1>1>u6>u6>roomC>0>>0>uid00000000006>0>0>8>0>0>0"
 _LEAVE_NAME = "u3"
@@ -84,18 +85,20 @@ async def test_full_pipeline(tmp_path):
         asyncio.create_task(sampler.run()),
     ]
     try:
-        # 等全链路生效:快照 + u11 + u10 + legacy 事件 → 6 名用户
-        assert await _wait_until(lambda: client.has_data and len(userlist) == 6), (
+        # 等全链路生效:快照 + u11 + u10 + legacy 事件 → 7 名用户
+        assert await _wait_until(lambda: client.has_data and len(userlist) == 7), (
             f"用户列表未达预期: {len(userlist)}"
         )
         # 等采样器落库
         assert await _wait_until(lambda: db.latest() is not None)
         row = db.latest()
-        # online=6(u1..u6 + legacy)
+        # online=7(u1..u7 + legacy);real = 7 − 1 个 A.I. = 6
         # chatting: u1(9) u2(5) u6(8) = 3
         # active: u3 已被 u10 删除 → 0
-        # away: u4 = 1; entering: u5 + legacy = 2
-        assert (row["online"], row["chatting"], row["active"], row["away"], row["entering"]) == (6, 3, 0, 1, 2), row
+        # away: u4 = 1
+        # heat: 20(u1) + 12(u2) + 18(u6) + 0(u4 挂机) + 1(u5 进入) + 1(legacy 进入) + 0(A.I.) = 52
+        assert (row["online"], row["real"], row["chatting"], row["active"],
+                row["away"], row["heat"]) == (7, 6, 3, 0, 1, 52.0), row
         # 握手回执已发生;心跳周期 2s,稍等它出现(须在清理之前)
         assert any(m == ">#" for m in RECEIVED)
         assert await _wait_until(lambda: any(m == "c" for m in RECEIVED), timeout=4.0)

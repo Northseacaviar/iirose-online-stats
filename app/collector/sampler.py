@@ -1,5 +1,6 @@
-"""采样循环:每 interval_seconds 从用户列表计算五项指标并入库。
+"""采样循环:每 interval_seconds 从用户列表计算指标并入库。
 
+指标:online / real(总人数−A.I.) / chatting / active / away / heat(全站热度)。
 仅在收到过快照(has_data)时采样;断连期间留空(图表留缺口,不补零)。
 入库前做异常检测:偏离自身近窗口内均值过大的样本剔除(见 anomaly.py)。
 """
@@ -13,6 +14,18 @@ from storage.db import Database
 
 from .anomaly import DEFAULT_CONFIG, reject_reason
 from .ws_client import IIRoseClient
+
+# 采样日志/告警里按这个顺序打印指标
+_METRIC_LOG = (
+    ("online", "%d"), ("real", "%d"), ("chatting", "%d"),
+    ("active", "%d"), ("away", "%d"), ("heat", "%.1f"),
+)
+
+
+def _fmt_stats(stats: dict) -> str:
+    return " ".join(
+        f"{name}={fmt % stats[name]}" for name, fmt in _METRIC_LOG
+    )
 
 
 class Sampler:
@@ -57,10 +70,11 @@ class Sampler:
         self.db.insert_sample(
             ts,
             stats["online"],
+            stats["real"],
             stats["chatting"],
             stats["active"],
             stats["away"],
-            stats["entering"],
+            stats["heat"],
         )
 
     async def run(self) -> None:
@@ -79,18 +93,10 @@ class Sampler:
                 self.log.warning("anomaly 配置无效,跳过异常检测,直接入库")
                 reason = None
             if reason:
-                self.log.warning(
-                    "采样异常,已剔除 online=%d chatting=%d active=%d away=%d entering=%d(%s)",
-                    stats["online"], stats["chatting"], stats["active"],
-                    stats["away"], stats["entering"], reason,
-                )
+                self.log.warning("采样异常,已剔除 %s(%s)", _fmt_stats(stats), reason)
                 continue
             try:
                 await asyncio.to_thread(self._insert, ts, stats)
-                self.log.info(
-                    "采样 %s online=%d chatting=%d active=%d away=%d entering=%d",
-                    ts, stats["online"], stats["chatting"], stats["active"],
-                    stats["away"], stats["entering"],
-                )
+                self.log.info("采样 %s %s", ts, _fmt_stats(stats))
             except Exception:
                 self.log.exception("采样入库失败")

@@ -127,8 +127,8 @@ const seriesUrls = [];
 let mockSeries = {
     interval_seconds: 60,
     samples: [
-        { ts: '2026-09-17T10:00:00', online: 6, chatting: 2, active: 2, away: 1, entering: 1 },
-        { ts: '2026-09-17T10:01:00', online: 8, chatting: 3, active: 2, away: 1, entering: 1 },
+        { ts: '2026-09-17T10:00:00', online: 6, chatting: 2, active: 2, away: 1, real: 5, heat: 40 },
+        { ts: '2026-09-17T10:01:00', online: 8, chatting: 3, active: 2, away: 1, real: 7, heat: 57 },
     ],
 };
 global.fetch = (url, opts) => {
@@ -153,8 +153,17 @@ eval(code);
     assert(got.chatting === 3, 'chatting=3(9/5/8)');
     assert(got.active === 2, 'active=2(4/0)');
     assert(got.away === 1, 'away=1(空状态)');
-    assert(got.entering === 1, 'entering=1(*)');
-    assert(posted.length === 1 && posted[0].online === 8, '首轮 tick 上报完整五桶');
+    assert(got.real === 7, 'real=7(8 人中扣掉 1 个 AI)');
+    assert(got.heat === 57, 'heat=57(20+12+4+2+0+1+18,AI 不计分)');
+    assert(posted.length === 1 && posted[0].online === 8 && posted[0].heat === 57,
+        '首轮 tick 上报完整指标');
+
+    /* 热度分数表:优先用页面里的 Assets.userStatusScoreJson(站点真值),没有才退回内置表 */
+    window.Objs.mapHolder.Assets.userStatusScoreJson =
+        { '9': 100, '8': 90, '5': 50, '4': 4, '0': 2, '': 0, '*': 1, 'a': 0 };
+    assert(window.iiroseStats.compute().heat === 247, '有站点分数表时按站点口径算热度');
+    delete window.Objs.mapHolder.Assets.userStatusScoreJson;
+    assert(window.iiroseStats.compute().heat === 57, '站点未暴露分数表时退回内置表');
 
     /* 按钮 */
     const btn = body.children[0];
@@ -265,8 +274,8 @@ eval(code);
     mockSeries = {
         interval_seconds: 60,
         samples: [
-            { ts: fmtMs(NOW_MS - 6 * 60000), online: 100, chatting: 10, active: 20, away: 50, entering: 2 },
-            { ts: fmtMs(NOW_MS), online: 110, chatting: 12, active: 22, away: 55, entering: 2 },
+            { ts: fmtMs(NOW_MS - 6 * 60000), online: 100, chatting: 10, active: 20, away: 50, real: 98, heat: 300 },
+            { ts: fmtMs(NOW_MS), online: 110, chatting: 12, active: 22, away: 55, real: 108, heat: 330 },
         ],
     };
     panel.children[2].children[3]._listeners.click(); // 点 24h 重新拉取
@@ -278,8 +287,8 @@ eval(code);
     mockSeries = {
         interval_seconds: 60,
         samples: [
-            { ts: fmtMs(NOW_MS - 60000), online: 100, chatting: 10, active: 20, away: 50, entering: 2 },
-            { ts: fmtMs(NOW_MS), online: 110, chatting: 12, active: 22, away: 55, entering: 2 },
+            { ts: fmtMs(NOW_MS - 60000), online: 100, chatting: 10, active: 20, away: 50, real: 98, heat: 300 },
+            { ts: fmtMs(NOW_MS), online: 110, chatting: 12, active: 22, away: 55, real: 108, heat: 330 },
         ],
     };
     panel.children[2].children[0]._listeners.click(); // 点 1h 重新拉取

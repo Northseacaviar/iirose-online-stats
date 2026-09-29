@@ -14,19 +14,19 @@ from web.server import create_app
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
 
-SAMPLE = {"online": 156, "chatting": 19, "active": 31, "away": 67, "entering": 3}
+SAMPLE = {"online": 156, "real": 154, "chatting": 19, "active": 31, "away": 67, "heat": 486.5}
 
 
 def _client(db: Database) -> TestClient:
     return TestClient(TestServer(create_app(db, WEB_DIR)))
 
 
-def _seed_baseline(db: Database, n: int = 4, step: int = 60) -> None:
-    """种入近窗口内基线:online≈150 chatting≈20 active≈30 away≈60 entering≈3。"""
+def _seed_baseline(db: Database, n: int = 4, step: int = 600) -> None:
+    """种入近窗口内基线:online≈150 chatting≈20 active≈30 away≈60(real/heat 只入库,不参与判定)。"""
     now = datetime.now()
     for i in range(n, 0, -1):
         ts = (now - timedelta(seconds=i * step)).strftime("%Y-%m-%dT%H:%M:%S")
-        db.insert_sample(ts, 150 + i, 20, 30, 60, 3)
+        db.insert_sample(ts, 150 + i, 148 + i, 20, 30, 60, 480.0)
 
 
 def test_ingest_writes_row(tmp_path):
@@ -88,8 +88,8 @@ def test_ingest_rejects_bad_payload(tmp_path):
             r1 = await cli.post("/api/ingest", data="not json")
             r2 = await cli.post("/api/ingest", json={"online": 1})
             r3 = await cli.post(
-                "/api/ingest", json={"online": 1, "chatting": -2, "active": 0,
-                                     "away": 0, "entering": 0}
+                "/api/ingest", json={"online": 1, "real": 1, "chatting": -2, "active": 0,
+                                     "away": 0, "heat": 0}
             )
             assert r1.status == 400 and r2.status == 400 and r3.status == 400
         assert db.latest() is None
@@ -146,10 +146,10 @@ def test_ingest_rejects_invalid_number_types(tmp_path):
 def test_insert_ignore_keeps_first_row(tmp_path):
     db = Database(tmp_path / "t.db")
     ts = "2026-09-17T12:00:00"
-    assert db.insert_sample_ignore(ts, 100, 1, 2, 3, 4) is True
-    assert db.insert_sample_ignore(ts, 999, 9, 9, 9, 9) is False  # 同秒:WS 值保留
+    assert db.insert_sample_ignore(ts, 100, 98, 1, 2, 3, 44.5) is True
+    assert db.insert_sample_ignore(ts, 999, 999, 9, 9, 9, 9.0) is False  # 同秒:WS 值保留
     row = db.latest()
-    assert row["online"] == 100 and row["entering"] == 4
+    assert row["online"] == 100 and row["real"] == 98 and row["heat"] == 44.5
 
 
 def test_ingest_row_appears_in_series_api(tmp_path):
@@ -181,7 +181,7 @@ def test_ingest_rejects_anomalous_sample(tmp_path):
         before = db.latest()["ts"]
         async with _client(db) as cli:
             resp = await cli.post("/api/ingest", json={
-                "online": 40, "chatting": 5, "active": 8, "away": 15, "entering": 0})
+                "online": 40, "real": 38, "chatting": 5, "active": 8, "away": 15, "heat": 90})
             body = await resp.json()
             assert resp.status == 200
             assert body["ok"] is True and body["written"] is False
@@ -196,7 +196,7 @@ def test_ingest_accepts_normal_sample_with_baseline(tmp_path):
         _seed_baseline(db)
         async with _client(db) as cli:
             resp = await cli.post("/api/ingest", json={
-                "online": 151, "chatting": 21, "active": 29, "away": 59, "entering": 2})
+                "online": 151, "real": 149, "chatting": 21, "active": 29, "away": 59, "heat": 470.5})
             body = await resp.json()
             assert body["written"] is True
     asyncio.run(run())
@@ -208,9 +208,44 @@ def test_ingest_single_metric_spike_accepted(tmp_path):
         _seed_baseline(db)
         async with _client(db) as cli:
             resp = await cli.post("/api/ingest", json={
-                "online": 151, "chatting": 21, "active": 29, "away": 59, "entering": 15})
+                "online": 151, "real": 149, "chatting": 40, "active": 29, "away": 59, "heat": 470.5})
             body = await resp.json()
-            assert body["written"] is True  # 只有 entering 尖峰:放行
+            assert body["written"] is True  # 只有 chatting 尖峰:单项违规,放行
+    asyncio.run(run())
+
+
+def test_ingest_accepts_fractional_heat(tmp_path):
+    """热度允许小数(站点状态分含 3.5/2.5),按 1 位小数入库。"""
+    async def run():
+        db = Database(tmp_path / "t.db")
+        async with _client(db) as cli:
+            resp = await cli.post("/api/ingest", json={**SAMPLE, "heat": 486.34})
+            body = await resp.json()
+            assert body["written"] is True
+        assert db.latest()["heat"] == 486.3
+    asyncio.run(run())
+
+
+def test_ingest_rejects_non_numeric_heat(tmp_path):
+    """热度仍须是有限实数:字符串/None/bool/NaN 一律拒绝。"""
+    async def run():
+        db = Database(tmp_path / "t.db")
+        async with _client(db) as cli:
+            for bad in ("hot", None, True, float("nan")):
+                resp = await cli.post("/api/ingest", json={**SAMPLE, "heat": bad})
+                assert resp.status == 400, bad
+        assert db.latest() is None
+    asyncio.run(run())
+
+
+def test_ingest_rejects_fractional_people_count(tmp_path):
+    """人数指标仍不许小数(防静默截断)——放宽只针对热度。"""
+    async def run():
+        db = Database(tmp_path / "t.db")
+        async with _client(db) as cli:
+            resp = await cli.post("/api/ingest", json={**SAMPLE, "real": 154.5})
+            assert resp.status == 400
+        assert db.latest() is None
     asyncio.run(run())
 
 
@@ -218,8 +253,8 @@ def test_ingest_stale_baseline_not_used(tmp_path):
     """窗口外(>5 分钟)的旧样本不参与基线:首条新样本直接放行。"""
     async def run():
         db = Database(tmp_path / "t.db")
-        old = (datetime.now() - timedelta(seconds=900)).strftime("%Y-%m-%dT%H:%M:%S")
-        db.insert_sample(old, 40, 5, 8, 15, 0)  # 很久以前的异常值,不应作基线
+        old = (datetime.now() - timedelta(seconds=7200)).strftime("%Y-%m-%dT%H:%M:%S")
+        db.insert_sample(old, 40, 38, 5, 8, 15, 90.0)  # 窗口外的老异常值,不应作基线
         async with _client(db) as cli:
             resp = await cli.post("/api/ingest", json=SAMPLE)
             body = await resp.json()

@@ -28,7 +28,7 @@ def test_load_config_partial_yaml(tmp_path):
 
 def test_load_config_missing_file_returns_defaults(tmp_path):
     config = load_config(tmp_path / "nope.yaml")
-    assert config["interval_seconds"] == 60
+    assert config["interval_seconds"] == 600
     assert config["ws"]["enabled"] is False
 
 

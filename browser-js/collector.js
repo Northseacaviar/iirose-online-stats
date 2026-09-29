@@ -21,7 +21,7 @@
     var ENDPOINT = 'http://127.0.0.1:8080/api/ingest';
     var SERIES_URL = 'http://127.0.0.1:8080/api/series?range=';
     var DASHBOARD = 'http://127.0.0.1:8080/';
-    var INTERVAL_MS = 60 * 1000;
+    var INTERVAL_MS = 10 * 60 * 1000;
     /* 固定时间窗口(毫秒):图表横轴始终显示完整范围,缺失时段留空不压缩 */
     var RANGE_MS = { '1h': 3600000, '3h': 10800000, '8h': 28800000, '24h': 86400000, '7d': 604800000 };
 
@@ -30,16 +30,27 @@
     var BTN_BOTTOM_PX = 140;
     var Z = '2147483647';
     var PANEL_KEY = 'iirose_stats_panel';      // {x,y,w,h}
-    var KEYS = ['online', 'chatting', 'active', 'away', 'entering'];
-    var LABELS = ['Online', 'Chatting', 'Active', 'Away', 'Entering'];
-    var COLORS = ['#3987e5', '#68b26d', '#f89323', '#f04747', '#a0a0a0'];  // 与仪表盘深色调色板一致
+    var KEYS = ['online', 'chatting', 'active', 'away', 'real', 'heat'];
+    var LABELS = ['Online', 'Chatting', 'Active', 'Away', '真人', '热度'];
+    var COLORS = ['#3987e5', '#68b26d', '#f89323', '#f04747', '#4bb5b5', '#e0975a'];  // 与仪表盘深色调色板一致
 
-    /* ===== 与 stats tools(1) 相同的分桶:d[""]=10 d["*"]=11 d["a"]=12,数字状态直接作下标 ===== */
+    /* 热度兜底分数表(与 app/collector/heat.py 同一份,来源:站内 wiki「状态与热度贡献」)。
+     * 页面里优先用站点自己的 Assets.userStatusScoreJson,读不到才退回这份。 */
+    var FALLBACK_SCORE = {
+        '9': 20, '8': 18, '7': 16, '6': 14, '5': 12,
+        '4': 4, '3': 3.5, '2': 3, '1': 2.5, '0': 2,
+        '': 0, '*': 1, 'a': 0
+    };
+
+    /* ===== 与 stats tools(1) 相同的分桶:d[""]=10 d["*"]=11 d["a"]=12,数字状态直接作下标。
+     * 另聚合两项:real = 总人数 − A.I. 人数;heat = Σ 每个用户的状态分(站点口径的全站热度) ===== */
     function compute() {
         var A = window.Objs && window.Objs.mapHolder && window.Objs.mapHolder.Assets;
         if (!A || !A.userJson) return null;
+        var score = (A.userStatusScoreJson && typeof A.userStatusScoreJson === 'object')
+            ? A.userStatusScoreJson : FALLBACK_SCORE;
         var d = [];
-        var online = 0;
+        var online = 0, heat = 0;
         for (var k in A.userJson) {
             var rec = A.userJson[k];
             if (!Array.isArray(rec)) continue;
@@ -47,6 +58,10 @@
             var st = rec[11] == null ? '' : rec[11];
             var idx = st === '' ? 10 : st === '*' ? 11 : st === 'a' ? 12 : st;
             d[idx] = (d[idx] || 0) + 1;
+            if (st !== 'a') {          // 机器人账户不贡献热度
+                var sc = Number(score[st]);
+                if (isFinite(sc)) heat += sc;
+            }
         }
         var sum = function (from, to) {
             var s = 0;
@@ -58,7 +73,8 @@
             chatting: sum(5, 9),
             active: sum(0, 4),
             away: d[10] || 0,
-            entering: d[11] || 0,
+            real: online - (d[12] || 0),
+            heat: Math.round(heat * 10) / 10,
         };
     }
 
@@ -167,7 +183,7 @@
     function buildTiles() {
         var tiles = document.createElement('div');
         tiles.style.cssText =
-            'flex:none;display:grid;grid-template-columns:repeat(5,1fr);gap:6px;padding:8px 10px 0;';
+            'flex:none;display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:6px;padding:8px 10px 0;';
         for (var i = 0; i < KEYS.length; i++) {
             var tile = document.createElement('div');
             tile.style.cssText =
@@ -473,7 +489,7 @@
                 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
         }
         function nullPoint(t) {
-            return { ts: fmt(new Date(t)), online: null, chatting: null, active: null, away: null, entering: null };
+            return { ts: fmt(new Date(t)), online: null, chatting: null, active: null, away: null, real: null, heat: null };
         }
         if (!samples.length) return [];
         var nowMs = Date.now();
@@ -503,7 +519,7 @@
         var c = chartCanvas;
         var dpr = window.devicePixelRatio || 1;
         var cssW = Math.max(120, panel.clientWidth - 20);
-        var cssH = Math.max(160, panel.clientHeight - 250);
+        var cssH = Math.max(160, panel.clientHeight - 296);
         c.style.width = cssW + 'px';
         c.style.height = cssH + 'px';
         c.width = cssW * dpr;
@@ -519,13 +535,23 @@
             return;
         }
 
-        var padL = 34, padR = 8, padT = 6, padB = 18;
+        var padL = 34, padR = 34, padT = 6, padB = 18;   // 右侧留给热度轴
         var plotW = cssW - padL - padR, plotH = cssH - padT - padB;
         var n = data.length;
 
-        var max = 0;
-        data.forEach(function (r) { KEYS.forEach(function (k) { max = Math.max(max, r[k] || 0); }); });
+        /* 两条轴:人数走左轴,热度量级大一个数量级、单独走右轴(共轴会把人数压成一条平线) */
+        var max = 0, maxHeat = 0;
+        data.forEach(function (r) {
+            KEYS.forEach(function (k) {
+                var v = r[k] || 0;
+                if (k === 'heat') maxHeat = Math.max(maxHeat, v);
+                else max = Math.max(max, v);
+            });
+        });
         max = Math.max(50, Math.ceil(max / 50) * 50);
+        maxHeat = Math.max(50, Math.ceil(maxHeat / 50) * 50);
+        var heatIdx = KEYS.indexOf('heat');
+        var heatColor = heatIdx >= 0 ? COLORS[heatIdx] : '#888';
 
         /* 网格 + y 轴 */
         ctx.font = '10px sans-serif';
@@ -541,12 +567,16 @@
             ctx.fillStyle = '#888';
             ctx.textAlign = 'right';
             ctx.fillText(String(Math.round(val)), padL - 5, py);
+            ctx.fillStyle = heatColor;   // 右轴:热度刻度,用热度线的颜色
+            ctx.textAlign = 'left';
+            ctx.fillText(String(Math.round(maxHeat * gy / 4)), cssW - padR + 5, py);
         }
 
-        /* 五条折线(null 空点处断开,不跨缺口连线) */
+        /* 六条折线(null 空点处断开,不跨缺口连线) */
         ctx.lineWidth = 1.6;
         ctx.lineJoin = 'round';
         for (var s = 0; s < KEYS.length; s++) {
+            var vmax = KEYS[s] === 'heat' ? maxHeat : max;
             ctx.strokeStyle = COLORS[s];
             ctx.beginPath();
             var started = false;
@@ -554,7 +584,7 @@
                 var v = data[i][KEYS[s]];
                 if (v === null || v === undefined) { started = false; continue; } // 缺口:断开曲线
                 var x = padL + plotW * i / (n - 1);
-                var y = padT + plotH - plotH * v / max;
+                var y = padT + plotH - plotH * v / vmax;
                 if (started) ctx.lineTo(x, y);
                 else { ctx.moveTo(x, y); started = true; }
             }
@@ -636,8 +666,9 @@
         if (!btn || panel) return; // 展开时按钮显示「收起」
         btn.textContent = '📊 ' + sample.online;
         btn.title = '点击打开/关闭监测面板\nOnline ' + sample.online +
-            ' · Chatting ' + sample.chatting + ' · Active ' + sample.active +
-            ' · Away ' + sample.away + ' · Entering ' + sample.entering;
+            ' · 真人 ' + sample.real + ' · Chatting ' + sample.chatting +
+            ' · Active ' + sample.active + ' · Away ' + sample.away +
+            ' · 热度 ' + sample.heat;
     }
 
     function closePanel() {

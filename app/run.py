@@ -21,7 +21,7 @@ from web.server import create_app
 ROOT = Path(__file__).resolve().parent
 
 _DEFAULT_CONFIG = {
-    "interval_seconds": 60,
+    "interval_seconds": 600,
     "http": {"host": "127.0.0.1", "port": 8080},
     "ws": {
         "enabled": False,  # 与发布的 config.yaml 一致:默认网页脚本模式,避免删配置后静默切回 WS
@@ -125,7 +125,7 @@ async def main() -> None:
     acct = config.get("account", {})
     ws_enabled = bool(ws_cfg.get("enabled", False))
     anomaly_cfg = config.get("anomaly") or {}
-    interval_seconds = _num(config["interval_seconds"], 60.0, 1.0)  # ≤0 会导致忙循环/前端死循环
+    interval_seconds = _num(config["interval_seconds"], 600.0, 1.0)  # ≤0 会导致忙循环/前端死循环
     if ws_enabled:
         client = IIRoseClient(
             userlist,

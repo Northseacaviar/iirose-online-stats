@@ -1,27 +1,33 @@
 """入库样本异常检测:偏离自身近 window_seconds 内均值的样本剔除。
 
 动机:浏览器脚本更新(页面重载瞬间用户列表只加载了一部分)、站点断连恢复等
-会造成瞬时异常数据。与自身近 5 分钟均值偏差过大的样本不进库。
+会造成瞬时异常数据。与自身近窗口均值偏差过大的样本不进库。
 
 规则:
 - 基线 = 近 window_seconds 内已入库样本(≥ min_samples 条才判断,否则放行);
 - 每项指标 |候选值 - 均值| > max(abs, rel × 均值) 记一次违规;
-- ≥ 2 项指标同时违规才剔除 —— 单指标偶发抖动(如 entering 尖峰)属正常,
+- ≥ 2 项指标同时违规才剔除 —— 单指标偶发抖动属正常,
   脚本更新/断连类故障通常是多项同时崩塌。
+
+判定项只有四项人数指标(online/chatting/active/away):real 与 online、
+heat 与 chatting 各自高度共线,加进来只会把「两项同时违规」的门槛搅浑,
+所以它们只入库、不参与判定。
+
+窗口必须 ≥ 采样间隔的若干倍,否则窗口里样本数到不了 min_samples、
+判定永远不触发(采样间隔 600 秒时窗口取 3600 秒 = 6 条样本)。
 """
 from __future__ import annotations
 
-METRICS = ("online", "chatting", "active", "away", "entering")
+METRICS = ("online", "chatting", "active", "away")
 
 DEFAULT_CONFIG: dict = {
-    "window_seconds": 300,
+    "window_seconds": 3600,
     "min_samples": 3,
     "thresholds": {
         "online": {"abs": 15, "rel": 0.35},
         "chatting": {"abs": 12, "rel": 0.6},
         "active": {"abs": 12, "rel": 0.6},
         "away": {"abs": 15, "rel": 0.35},
-        "entering": {"abs": 6, "rel": 1.0},
     },
 }
 

@@ -19,31 +19,38 @@ class _FakeDb:
     def latest(self):
         if self.last_ts is None:
             return None
-        return {"ts": self.last_ts, "online": 1, "chatting": 1, "active": 1,
-                "away": 1, "entering": 1}
+        return {"ts": self.last_ts, "online": 1, "real": 1, "chatting": 1,
+                "active": 1, "away": 1, "heat": 2.0}
 
-    def insert_sample(self, ts, online, chatting, active, away, entering):
-        self.inserted.append((ts, online, chatting, active, away, entering))
+    def insert_sample(self, ts, online, real, chatting, active, away, heat):
+        self.inserted.append((ts, online, real, chatting, active, away, heat))
 
 
 def _sampler(db, log):
-    return Sampler(None, db, interval_seconds=60, log=log)
+    return Sampler(None, db, interval_seconds=600, log=log)
 
 
 def _insert(sampler):
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    stats = {"online": 100, "chatting": 20, "active": 30, "away": 40, "entering": 5}
+    stats = {"online": 100, "real": 98, "chatting": 20, "active": 30,
+             "away": 40, "heat": 512.5}
     sampler._insert(now, stats)
     return now
 
 
 def test_recent_sample_no_warning(caplog):
-    last = (datetime.now() - timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%S")
+    last = (datetime.now() - timedelta(seconds=600)).strftime("%Y-%m-%dT%H:%M:%S")
     db = _FakeDb(last_ts=last)
     with caplog.at_level(logging.WARNING):
         _insert(_sampler(db, logging.getLogger("t")))
     assert not caplog.text, f"正常间隔不应警告,却输出: {caplog.text}"
     assert len(db.inserted) == 1
+
+
+def test_inserted_row_carries_all_metrics():
+    db = _FakeDb()
+    _insert(_sampler(db, logging.getLogger("t")))
+    assert db.inserted[0][1:] == (100, 98, 20, 30, 40, 512.5)
 
 
 def test_gap_after_shutdown_warns(caplog):

@@ -95,7 +95,7 @@ def create_app(
         return web.json_response({"sample": row})
 
     async def api_ingest(request: web.Request) -> web.Response:
-        """浏览器侧上报入口(POST JSON:{online,chatting,active,away,entering})。
+        """浏览器侧上报入口(POST JSON:{online,real,chatting,active,away,heat})。
 
         时间戳取服务器本机时钟(与 WS 采样同源);同秒已有采样则不覆盖(WS 优先)。
         """
@@ -105,14 +105,18 @@ def create_app(
             return web.json_response({"ok": False, "error": "invalid json"}, status=400)
         if not isinstance(payload, dict):  # list/字符串载荷:payload[k] 会抛 TypeError→500
             return web.json_response({"ok": False, "error": "bad fields"}, status=400)
-        keys = ("online", "chatting", "active", "away", "entering")
+        # 人数指标必须是整数;热度是实数(站点分数含 .5)
+        int_keys = ("online", "real", "chatting", "active", "away")
+        float_keys = ("heat",)
+        keys = int_keys + float_keys
         try:
-            raw = [payload[k] for k in keys]
+            raw = {k: payload[k] for k in keys}
         except (KeyError, TypeError):
             return web.json_response({"ok": False, "error": "bad fields"}, status=400)
-        # 严格校验:拒绝 bool(True 会被 int() 当 1)、小数(int(1.9) 静默截断为 1)、
-        # NaN/Infinity(json 标准字面量,int() 会抛 ValueError→500)
-        def _bad(v) -> bool:
+
+        def _bad_int(v) -> bool:
+            # 拒 bool(True 会被 int() 当 1)、小数(int(1.9) 静默截断为 1)、
+            # NaN/Infinity(json 标准字面量,int() 会抛 ValueError→500)
             if isinstance(v, bool):
                 return True
             if isinstance(v, int):
@@ -121,21 +125,35 @@ def create_app(
                 return not math.isfinite(v) or v != int(v)
             return True
 
-        if any(_bad(v) for v in raw):
+        def _bad_float(v) -> bool:
+            # 热度:允许小数,但必须是有限实数
+            if isinstance(v, bool):
+                return True
+            if isinstance(v, (int, float)):
+                return not math.isfinite(v)
+            return True
+
+        if any(_bad_int(raw[k]) for k in int_keys) or any(
+            _bad_float(raw[k]) for k in float_keys
+        ):
             return web.json_response({"ok": False, "error": "bad fields"}, status=400)
-        values = [int(v) for v in raw]
-        if any(v < 0 or v > _MAX_SAMPLE_VALUE for v in values):
+        counts = [int(raw[k]) for k in int_keys]
+        heat = round(float(raw[float_keys[0]]), 1)
+        if any(v < 0 or v > _MAX_SAMPLE_VALUE for v in [*counts, heat]):
             return web.json_response({"ok": False, "error": "out of range"}, status=400)
         ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         # 异常检测:偏离自身近窗口内均值过大的样本剔除(脚本更新/断连等)
         window = anomaly_cfg.get("window_seconds", DEFAULT_CONFIG["window_seconds"])
         since = (datetime.now() - timedelta(seconds=window)).strftime("%Y-%m-%dT%H:%M:%S")
         recent = await asyncio.to_thread(db.query, since)
-        reason = reject_reason(dict(zip(keys, values)), recent, anomaly_cfg)
+        sample = dict(zip(int_keys, counts)) | {"heat": heat}
+        reason = reject_reason(sample, recent, anomaly_cfg)
         if reason:
             log.warning("浏览器上报异常,已剔除(%s)", reason)
             return web.json_response({"ok": True, "written": False, "rejected": reason})
-        written = await asyncio.to_thread(db.insert_sample_ignore, ts, *values)
+        written = await asyncio.to_thread(
+            db.insert_sample_ignore, ts, *counts, heat
+        )
         return web.json_response({"ok": True, "written": written, "ts": ts})
 
     app.router.add_get("/", index)
