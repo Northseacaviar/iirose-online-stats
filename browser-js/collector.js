@@ -30,6 +30,7 @@
     var BTN_BOTTOM_PX = 140;
     var Z = '2147483647';
     var PANEL_KEY = 'iirose_stats_panel';      // {x,y,w,h}
+    var HIDDEN_KEY = 'iirose_stats_hidden_lines'; // 被隐藏的线条 key 数组
     var KEYS = ['online', 'chatting', 'active', 'away', 'real', 'heat'];
     var LABELS = ['Online', 'Chatting', 'Active', 'Away', '真人', '热度'];
     var COLORS = ['#3987e5', '#68b26d', '#f89323', '#f04747', '#4bb5b5', '#e0975a'];  // 与仪表盘深色调色板一致
@@ -91,6 +92,34 @@
     var chartInterval = 60; // 服务端采样间隔(秒),用于识别数据缺口
     var chartWindowMs = RANGE_MS['24h']; // 当前范围的固定时间窗口
     var legendVals = [];
+    var legendItems = [];                 // 图例项(点一下切换对应线的显隐)
+    var hiddenKeys = loadHiddenKeys();    // 被隐藏的线(持久化,刷新页面/重开面板仍生效)
+
+    /* ===== 线条显隐:与位置尺寸各存一份(localStorage 的另一个 key) ===== */
+    function loadHiddenKeys() {
+        try {
+            var saved = JSON.parse(localStorage.getItem(HIDDEN_KEY) || '[]');
+            if (!Array.isArray(saved)) return [];
+            return saved.filter(function (k) { return KEYS.indexOf(k) >= 0; }); // 丢弃已不存在的 key
+        } catch (e) { return []; }  // 存储被禁用/内容写坏:退回全部显示
+    }
+    function isHidden(key) { return hiddenKeys.indexOf(key) >= 0; }
+    function toggleLine(key) {
+        var i = hiddenKeys.indexOf(key);
+        if (i >= 0) hiddenKeys.splice(i, 1);
+        else hiddenKeys.push(key);
+        try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(hiddenKeys)); } catch (e) { /* 写不进:本次会话内仍生效 */ }
+        syncLegendItems();
+        drawChart();
+    }
+    /* 隐藏的图例项变暗并改提示语(点击前能看出当前是哪几项被关掉) */
+    function syncLegendItems() {
+        for (var i = 0; i < legendItems.length; i++) {
+            var off = isHidden(KEYS[i]);
+            legendItems[i].style.opacity = off ? '0.35' : '';
+            legendItems[i].title = '点击' + (off ? '显示' : '隐藏') + '这条线';
+        }
+    }
 
     function buildButton() {
         btn = document.createElement('div');
@@ -234,14 +263,20 @@
     }
 
     function buildLegend() {
-        /* 图例(含最新值) */
+        /* 图例(含最新值):点一项切换该线显隐,隐藏项变暗(状态持久化) */
         var legend = document.createElement('div');
         legend.className = 'iirose-stats-legend';
         legend.style.cssText = 'flex:none;display:flex;flex-wrap:wrap;gap:8px;padding:6px 10px 0;font-size:11px;color:#c3c2b7;';
         legendVals.length = 0;
+        legendItems.length = 0;
+        function makeToggle(key) {
+            return function () { toggleLine(key); };
+        }
         for (var j = 0; j < KEYS.length; j++) {
             var item = document.createElement('span');
-            item.style.cssText = 'display:flex;align-items:center;gap:4px;';
+            /* iirose-act:站点置顶层遮挡时,window 捕获阶段按坐标接管点击认这个类 */
+            item.className = 'iirose-act';
+            item.style.cssText = 'display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;';
             var lDot = document.createElement('span');
             lDot.style.cssText = 'width:8px;height:3px;border-radius:2px;background:' + COLORS[j] + ';';
             var lLab = document.createElement('span');
@@ -253,9 +288,12 @@
             item.appendChild(lDot);
             item.appendChild(lLab);
             item.appendChild(lVal);
+            item.addEventListener('click', makeToggle(KEYS[j]));
             legend.appendChild(item);
             legendVals.push(lVal);
+            legendItems.push(item);
         }
+        syncLegendItems();  // 重开面板时按记忆恢复隐藏项的暗显
         return legend;
     }
 
@@ -539,10 +577,12 @@
         var plotW = cssW - padL - padR, plotH = cssH - padT - padB;
         var n = data.length;
 
-        /* 两条轴:人数走左轴,热度量级大一个数量级、单独走右轴(共轴会把人数压成一条平线) */
+        /* 两条轴:人数走左轴,热度量级大一个数量级、单独走右轴(共轴会把人数压成一条平线)。
+         * 隐藏的线不参与量程 —— 否则关掉人数线后热度仍被压平(反之亦然)。 */
         var max = 0, maxHeat = 0;
         data.forEach(function (r) {
             KEYS.forEach(function (k) {
+                if (isHidden(k)) return;
                 var v = r[k] || 0;
                 if (k === 'heat') maxHeat = Math.max(maxHeat, v);
                 else max = Math.max(max, v);
@@ -567,15 +607,18 @@
             ctx.fillStyle = '#888';
             ctx.textAlign = 'right';
             ctx.fillText(String(Math.round(val)), padL - 5, py);
-            ctx.fillStyle = heatColor;   // 右轴:热度刻度,用热度线的颜色
-            ctx.textAlign = 'left';
-            ctx.fillText(String(Math.round(maxHeat * gy / 4)), cssW - padR + 5, py);
+            if (!isHidden('heat')) {   // 热度线关掉时右轴刻度一并收起,不留一排无对应的数
+                ctx.fillStyle = heatColor;   // 右轴:热度刻度,用热度线的颜色
+                ctx.textAlign = 'left';
+                ctx.fillText(String(Math.round(maxHeat * gy / 4)), cssW - padR + 5, py);
+            }
         }
 
-        /* 六条折线(null 空点处断开,不跨缺口连线) */
+        /* 折线(null 空点处断开,不跨缺口连线;隐藏的线跳过不画) */
         ctx.lineWidth = 1.6;
         ctx.lineJoin = 'round';
         for (var s = 0; s < KEYS.length; s++) {
+            if (isHidden(KEYS[s])) continue;
             var vmax = KEYS[s] === 'heat' ? maxHeat : max;
             ctx.strokeStyle = COLORS[s];
             ctx.beginPath();
@@ -725,5 +768,7 @@
             chartData.forEach(function (r) { if (r.online === null) gaps++; });
             return { points: chartData.length, gaps: gaps };
         },
+        /* 线条显隐诊断:当前被隐藏的线 */
+        hiddenLines: function () { return hiddenKeys.slice(); },
     };
 })();

@@ -128,7 +128,7 @@ tbody tr:nth-child(even) { background: color-mix(in srgb, var(--gridline) 35%, t
   <header>
     <div>
       <h1>iirose 在线状态监测</h1>
-      <div class="sub">全站数据 · 采样间隔见 config.yaml</div>
+      <div class="sub">全站数据 · 每 600 秒采样 · 点图例可隐藏/显示线条</div>
     </div>
     <button id="themeBtn" title="切换深浅主题">🌙 深色</button>
   </header>
@@ -190,6 +190,34 @@ let lastRenderedTs = null;  // 图表当前绘制的最新 ts
 let lastWindowSec = null;   // 上次渲染用的固定时间窗口(秒),主题切换重绘时复用
 const RANGE_SECONDS = { "1h": 3600, "3h": 3 * 3600, "8h": 8 * 3600, "24h": 86400, "7d": 7 * 86400, "all": null };
 
+/* ===== 线条显隐 =====
+ * 图例点击能切显隐(echarts 自带),但每次 setOption(notMerge) 都会把 legend.selected
+ * 重置回全选 —— 新样本到来、切时间范围、切主题都会把用户隐藏的线全部放回来。
+ * 所以隐藏项单独记一份(localStorage),每次渲染都带上,刷新页面也保持。 */
+const HIDDEN_KEY = "iirose_stats_hidden_lines";
+const hiddenKeys = new Set(loadHiddenKeys());
+
+function loadHiddenKeys() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(HIDDEN_KEY) || "[]");
+    return Array.isArray(raw) ? raw.filter((k) => SERIES.some((s) => s.key === k)) : [];
+  } catch (e) {
+    return []; // 存储被禁用或内容写坏:退回全显示
+  }
+}
+
+function saveHiddenKeys() {
+  try {
+    localStorage.setItem(HIDDEN_KEY, JSON.stringify([...hiddenKeys]));
+  } catch (e) { /* 无痕模式等写不进:本次会话内仍生效 */ }
+}
+
+function legendSelected() {
+  const sel = {};
+  for (const s of SERIES) sel[s.label] = !hiddenKeys.has(s.key);
+  return sel;
+}
+
 /* ?theme=dark|light 便于无头验证/快速切换 */
 const themeParam = new URLSearchParams(location.search).get("theme");
 if (themeParam === "dark" || themeParam === "light") {
@@ -243,6 +271,7 @@ function baseOption() {
     legend: {
       top: 0, left: 0, icon: "roundRect", itemWidth: 14, itemHeight: 4,
       textStyle: { color: ink, fontSize: 12 },
+      selected: legendSelected(), // 每次渲染都带上用户隐藏的线,否则重绘即复原
       // 最新值挂在图例上:六条线共用一个右端标签会互相压住(echarts 不做避让)
       formatter: (name) => {
         const meta = SERIES.find((x) => x.label === name);
@@ -266,8 +295,9 @@ function baseOption() {
         axisLabel: { color: muted, fontSize: 11 },
         splitLine: { lineStyle: { color: grid, width: 1 } },
       },
-      { // 右轴:热度(量级比人数大一个数量级,共轴会把人数压平)
+      { // 右轴:热度(量级比人数大一个数量级,共轴会把人数压平);热度线隐藏时轴一并收起
         type: "value",
+        show: !hiddenKeys.has("heat"),
         axisLine: { show: false },
         axisLabel: { color: cssVar("--series-6"), fontSize: 11 }, // 与热度线同色,一眼对得上
         splitLine: { show: false },
@@ -317,6 +347,14 @@ function initChart() {
   const dom = document.getElementById("chart");
   if (chart) { chart.dispose(); chart = null; }
   chart = echarts.init(dom, null, { renderer: "canvas" });
+  /* 图例点击 → 记下隐藏项(重绘、刷新页面都按它恢复),并重绘一次让轴跟着线条显隐更新
+   * (echarts 的图例点击只切线条本身,不会重建 option;热度线关掉时右轴要一并收起) */
+  chart.on("legendselectchanged", (p) => {
+    hiddenKeys.clear();
+    for (const s of SERIES) if (p.selected[s.label] === false) hiddenKeys.add(s.key);
+    saveHiddenKeys();
+    renderChart(lastSamples, true, lastWindowSec);
+  });
 }
 
 function renderChart(samples, force, windowSec) {
@@ -355,7 +393,7 @@ async function refresh(force) {
     lastDataTs = lastTs;
     const intervalSec = Number.isFinite(interval_seconds) && interval_seconds > 0 ? interval_seconds : 60;
     document.querySelector(".sub").textContent =
-      `全站数据 · 每 ${Math.round(intervalSec)} 秒采样(可在 config.yaml 修改)`;
+      `全站数据 · 每 ${Math.round(intervalSec)} 秒采样 · 点图例可隐藏/显示线条`;
     renderChart(padGaps(samples, intervalSec), force, RANGE_SECONDS[currentRange] ?? null);
 
     const { sample } = await latestResp.json();

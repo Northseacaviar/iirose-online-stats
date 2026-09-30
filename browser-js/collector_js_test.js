@@ -14,11 +14,12 @@ function assert(cond, msg) {
 
 /* ---- 最小 DOM shim ---- */
 let ctxCalls = 0;
+let ctxLog = [];   // 记录 canvas 调用(参数),用于断言坐标轴量程
 const ctxMock = new Proxy({}, {
     get(t, p) {
         if (p === 'measureText') return () => ({ width: 10 });
         ctxCalls++;
-        return () => {};
+        return (...args) => { ctxLog.push([String(p), args]); };
     },
     set() { return true; },
 });
@@ -252,6 +253,27 @@ eval(code);
     assert(panel3.scrollTop === 100, '遮挡下滚轮仍能滚动面板');
     document.topEl = null;
 
+    /* 线条显隐:点图例项切换该线,状态写 localStorage、跨面板重开保持 */
+    const legendBox = panel3.children[3];
+    assert(legendBox.children.length === 6 && legendBox.children[0].className === 'iirose-act',
+        '图例 6 项且可点击(iirose-act,遮挡接管时也认)');
+    legendBox.children[0]._listeners.click();  // 隐藏 Online
+    assert(window.iiroseStats.hiddenLines().join() === 'online', '点图例隐藏该线');
+    assert(storage['iirose_stats_hidden_lines'] === '["online"]', '隐藏状态写入 localStorage');
+    assert(legendBox.children[0].style.opacity === '0.35', '隐藏项变暗');
+    legendBox.children[0]._listeners.click();  // 再点显示回来
+    assert(window.iiroseStats.hiddenLines().length === 0, '再点一次恢复显示');
+    assert(storage['iirose_stats_hidden_lines'] === '[]' && legendBox.children[0].style.opacity === '',
+        '恢复后状态与外观复位');
+
+    legendBox.children[5]._listeners.click();  // 隐藏热度线
+    panel3.children[0].children[2]._listeners.click();  // ✕ 关闭
+    btn._listeners.click();  // 重开
+    const panel4 = body.children[1];
+    assert(panel4.children[3].children[5].style.opacity === '0.35', '重开面板仍保持隐藏(从 localStorage 恢复)');
+    panel4.children[3].children[5]._listeners.click();  // 复原
+    assert(storage['iirose_stats_hidden_lines'] === '[]', '复原后不再写隐藏项');
+
     /* 范围切换 */
     panel.children[2].children[0]._listeners.click();
     await flush();
@@ -297,6 +319,26 @@ eval(code);
     const lead1h = (3600 - 60) / 60; // 1h 窗口前导 = 59
     assert(info1h.gaps === lead1h, `连续数据只补窗口前导空点(${lead1h}),不补中间空点`);
     Date.now = realNow;
+
+    /* 隐藏的线不参与量程:关掉两条最大的(Online / 真人)后左轴上限跟着降,不被压平 */
+    const leftAxisMax = () => Math.max.apply(null, ctxLog
+        .filter((c) => c[0] === 'fillText' && /^\d+$/.test(String(c[1][0])) && c[1][1] < 60) // 左轴标签 x=padL-5
+        .map((c) => Number(c[1][0])));
+    const redrawAndAxisMax = async () => {
+        ctxLog = [];
+        panel4.children[2].children[2]._listeners.click(); // 点 8h:重新拉数据并重绘
+        await flush();
+        return leftAxisMax();
+    };
+    assert(await redrawAndAxisMax() === 150, '全部显示时左轴上限按最大的线(真人 108 → 150)');
+    const lg2 = panel4.children[3];
+    lg2.children[0]._listeners.click(); // 隐藏 Online
+    lg2.children[4]._listeners.click(); // 隐藏 真人
+    assert(window.iiroseStats.hiddenLines().join() === 'online,real', '连续隐藏两条线');
+    assert(await redrawAndAxisMax() === 100, '隐藏后左轴上限收缩到剩余最大线(Away 55 → 100)');
+    lg2.children[0]._listeners.click();
+    lg2.children[4]._listeners.click();
+    assert(storage['iirose_stats_hidden_lines'] === '[]', '再次点击恢复两条线');
 
     /* 完整仪表盘链接 */
     panel.children[0].children[1]._listeners.click({ stopPropagation() {} });
