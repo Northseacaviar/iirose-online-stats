@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import shutil
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 _SCHEMA = """
@@ -33,7 +34,10 @@ class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        # closing():sqlite3 连接的 with 只管事务提交,**不关闭连接** ——
+        # 只用 with 会每次操作漏一个文件句柄,靠 GC 兜底,漏到 fd 上限后
+        # 读写全部报 "unable to open database file"(实测:1024 软限,约 54 小时打满)。
+        with closing(self._connect()) as conn, conn:
             self._migrate(conn)
             conn.execute(_SCHEMA)
 
@@ -77,7 +81,10 @@ class Database:
         self, ts: str, online: int, real: int, chatting: int, active: int,
         away: int, heat: float,
     ) -> None:
-        with self._connect() as conn:
+        # closing():sqlite3 连接的 with 只管事务提交,**不关闭连接** ——
+        # 只用 with 会每次操作漏一个文件句柄,靠 GC 兜底,漏到 fd 上限后
+        # 读写全部报 "unable to open database file"(实测:1024 软限,约 54 小时打满)。
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT OR REPLACE INTO samples VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (ts, online, real, chatting, active, away, heat),
@@ -88,7 +95,10 @@ class Database:
         away: int, heat: float,
     ) -> bool:
         """浏览器侧上报:同秒已有 WS 采样时不覆盖,返回是否写入。"""
-        with self._connect() as conn:
+        # closing():sqlite3 连接的 with 只管事务提交,**不关闭连接** ——
+        # 只用 with 会每次操作漏一个文件句柄,靠 GC 兜底,漏到 fd 上限后
+        # 读写全部报 "unable to open database file"(实测:1024 软限,约 54 小时打满)。
+        with closing(self._connect()) as conn, conn:
             cur = conn.execute(
                 "INSERT OR IGNORE INTO samples VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (ts, online, real, chatting, active, away, heat),
@@ -109,13 +119,19 @@ class Database:
         if limit is not None:
             sql += " LIMIT ?"
             params += (limit,)
-        with self._connect() as conn:
+        # closing():sqlite3 连接的 with 只管事务提交,**不关闭连接** ——
+        # 只用 with 会每次操作漏一个文件句柄,靠 GC 兜底,漏到 fd 上限后
+        # 读写全部报 "unable to open database file"(实测:1024 软限,约 54 小时打满)。
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(sql, params).fetchall()
         return [dict(zip(_KEYS, row)) for row in rows]
 
     def latest(self) -> dict | None:
         """最新一条样本;库为空时返回 None。"""
-        with self._connect() as conn:
+        # closing():sqlite3 连接的 with 只管事务提交,**不关闭连接** ——
+        # 只用 with 会每次操作漏一个文件句柄,靠 GC 兜底,漏到 fd 上限后
+        # 读写全部报 "unable to open database file"(实测:1024 软限,约 54 小时打满)。
+        with closing(self._connect()) as conn, conn:
             row = conn.execute(_SELECT + " ORDER BY ts DESC LIMIT 1").fetchone()
         if row is None:
             return None
