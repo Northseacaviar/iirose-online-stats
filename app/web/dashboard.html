@@ -469,13 +469,18 @@ function updateDataStart(value) {
   }
 }
 
+/* 请求序号:轮询与"点按钮"并发时,老请求晚回来不许覆盖新状态(实测会画成旧范围) */
+let fetchSeq = 0;
+
 async function refresh(force) {
+  const seq = ++fetchSeq;
   try {
     const [seriesResp, latestResp] = await Promise.all([
       fetch(`/api/series?${seriesQuery()}`),
       fetch("/api/latest"),
     ]);
     const body = await seriesResp.json().catch(() => ({}));
+    if (seq !== fetchSeq) return;  // 已有更新的请求发出:这次结果作废
     if (!seriesResp.ok) {  // 日期参数非法等:后端给出原因,退回上一次的图不动
       document.getElementById("updatedAt").textContent = body.error || "查询失败";
       return;
@@ -484,36 +489,41 @@ async function refresh(force) {
     const interval_seconds = body.interval_seconds;
     updateDataStart(body.data_start);
     const lastTs = samples.length ? samples[samples.length - 1].ts : null;
-    if (!force && lastTs !== null && lastTs === lastDataTs) return; // 采样未变,不动 DOM
-    lastDataTs = lastTs;
-    const intervalSec = Number.isFinite(interval_seconds) && interval_seconds > 0 ? interval_seconds : 60;
-    document.querySelector(".sub").textContent =
-      `全站数据 · 每 ${Math.round(intervalSec)} 秒采样 · 点图例可隐藏/显示线条`;
-    renderChart(padGaps(samples, intervalSec), force, windowFor(body));
+    const seriesUnchanged = !force && lastTs !== null && lastTs === lastDataTs;
+    if (!seriesUnchanged) {
+      lastDataTs = lastTs;
+      const intervalSec = Number.isFinite(interval_seconds) && interval_seconds > 0 ? interval_seconds : 60;
+      document.querySelector(".sub").textContent =
+        `全站数据 · 每 ${Math.round(intervalSec)} 秒采样 · 点图例可隐藏/显示线条`;
+      renderChart(padGaps(samples, intervalSec), force, windowFor(body));
 
+      const tbody = document.getElementById("tbody");
+      const rows = samples.slice(-100).reverse();
+      // 用 DOM API + textContent 构建,数据即使将来混入字符串也不会被当 HTML 解析(XSS 防护)
+      tbody.replaceChildren(...rows.map((r) => {
+        const tr = document.createElement("tr");
+        const tdTime = document.createElement("td");
+        tdTime.textContent = r.ts.replace("T", " ").slice(5, 19);
+        tr.appendChild(tdTime);
+        for (const s of SERIES) {
+          const td = document.createElement("td");
+          td.textContent = r[s.key];
+          tr.appendChild(td);
+        }
+        return tr;
+      }));
+    }
+
+    // 瓦片与"最后采样"跟的是 /api/latest(与所选范围无关),必须每轮都更新 ——
+    // 过去区间下 series 末条样本恒定不变,跟着上面一起早退会把它们永久冻结
     const { sample } = await latestResp.json();
+    if (seq !== fetchSeq) return;
     if (sample) {
       for (const s of SERIES) document.getElementById("v-" + s.key).textContent = sample[s.key];
       document.getElementById("updatedAt").textContent = "最后采样 " + sample.ts.replace("T", " ").slice(5, 19);
     }
-
-    const tbody = document.getElementById("tbody");
-    const rows = samples.slice(-100).reverse();
-    // 用 DOM API + textContent 构建,数据即使将来混入字符串也不会被当 HTML 解析(XSS 防护)
-    tbody.replaceChildren(...rows.map((r) => {
-      const tr = document.createElement("tr");
-      const tdTime = document.createElement("td");
-      tdTime.textContent = r.ts.replace("T", " ").slice(5, 19);
-      tr.appendChild(tdTime);
-      for (const s of SERIES) {
-        const td = document.createElement("td");
-        td.textContent = r[s.key];
-        tr.appendChild(td);
-      }
-      return tr;
-    }));
   } catch (e) {
-    document.getElementById("updatedAt").textContent = "刷新失败,稍后重试";
+    if (seq === fetchSeq) document.getElementById("updatedAt").textContent = "刷新失败,稍后重试";
   }
 }
 
@@ -553,6 +563,11 @@ document.getElementById("applyCustom").addEventListener("click", () => {
   if (!start || !end) { customMsg.textContent = "请选开始与结束日期"; return; }
   if (start > end) { customMsg.textContent = "开始日期不能晚于结束日期"; return; }
   customMsg.textContent = "";
+  // 防呆:即使当前不在自定义模式(比如以后加了快捷键/程序化触发),点了应用就切过去
+  currentRange = "custom";
+  document.querySelectorAll("#rangeGrp button").forEach(
+    (b) => b.classList.toggle("active", b.dataset.range === "custom"));
+  customRow.hidden = false;
   customRange = { start: start, end: end };
   refresh(true);
 });

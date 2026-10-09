@@ -27,7 +27,8 @@ _RANGES = {
 }
 
 # 自定义范围只认日期(YYYY-MM-DD),前端用的 <input type="date"> 即此形态
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# 用 [0-9] 而非 \d:\d 在 str 模式下也匹配阿拉伯-印度数字/全角数字,那种串不是日期
+_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 
 def normalize_data_start(value) -> str | None:
@@ -55,14 +56,26 @@ def _now_ts() -> str:
 
 
 def _day_start(date_str: str) -> str:
-    """日期 → 该日 00:00:00 的时间戳(顺带校验日期真实存在:2 月 30 日会抛 ValueError)。"""
-    return datetime.strptime(date_str, "%Y-%m-%d").strftime(_TS_FMT)
+    """日期 → 该日 00:00:00 的时间戳;日期不存在则抛 ValueError(自家口径的文案)。"""
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").strftime(_TS_FMT)
+    except ValueError as exc:
+        raise ValueError(f"日期不存在:{date_str}") from exc
 
 
 def _day_after(date_str: str) -> str:
-    """日期 → 次日 00:00:00 的时间戳(自定义范围的结束日含当天整天)。"""
-    day = datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)
-    return day.strftime(_TS_FMT)
+    """日期 → 次日 00:00:00 的时间戳(自定义范围的结束日含当天整天)。
+
+    9999-12-31 加一天会越界(OverflowError)——按参数错误处理,不让它穿透成 500。
+    """
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"日期不存在:{date_str}") from exc
+    try:
+        return (day + timedelta(days=1)).strftime(_TS_FMT)
+    except OverflowError as exc:
+        raise ValueError("结束日期超出可处理范围(最晚 9999-12-30)") from exc
 
 
 # 跨域白名单:上报脚本只在 iirose 页面注入,其余来源一律不放行

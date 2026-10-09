@@ -194,7 +194,37 @@ def test_bad_date_params_rejected(tmp_path, query):
             body = await resp.json()
         assert resp.status == 400, query
         assert body["ok"] is False and body["error"]
+        # 报错信息须是自家口径,不能把 Python 内部原文(英文)透出去
+        assert "does not match format" not in body["error"], query
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("query", [
+    "end=9999-12-31",
+    "start=2026-10-01&end=9999-12-31",
+    "start=9999-12-31&end=9999-12-31",
+])
+def test_end_date_overflow_rejected(tmp_path, query):
+    """结束日 9999-12-31(次日会越界)必须 400 —— 曾因只捕 ValueError 而穿透成 500。"""
+    async def run():
+        db = Database(tmp_path / "t.db")
+        _seed(db, _SEED)
+        async with _client(db, DATA_START) as cli:
+            resp = await cli.get(f"/api/series?{query}")
+            body = await resp.json()
+        assert resp.status == 400, query
+        assert body["ok"] is False and body["error"]
+        assert "must be in" not in body["error"], query
+    asyncio.run(run())
+
+
+def test_date_re_only_ascii_digits():
+    """自定义范围只认 ASCII 日期:Unicode 数字(阿拉伯-印度数字、全角数字)不算日期。"""
+    from web.server import _DATE_RE
+
+    assert _DATE_RE.match("2026-10-01")
+    for bad in ("٢٠٢٦-١٠-٠١", "2026-1０-01", "2026-10-01T00:00:00", "2026-10-01 "):
+        assert not _DATE_RE.match(bad), bad
 
 
 def test_range_entirely_before_data_start_rejected(tmp_path):
