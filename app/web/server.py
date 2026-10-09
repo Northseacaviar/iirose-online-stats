@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -11,6 +12,9 @@ from aiohttp import web
 
 from collector.anomaly import DEFAULT_CONFIG, reject_reason
 from storage.db import Database
+
+# 时间戳格式:与本机采样、SQLite 里的 ts 列同一套(本地时间,秒精度)
+_TS_FMT = "%Y-%m-%dT%H:%M:%S"
 
 # 时间范围参数 → 回溯时长(秒)
 _RANGES = {
@@ -21,6 +25,45 @@ _RANGES = {
     "7d": 7 * 86400,
     "all": None,
 }
+
+# 自定义范围只认日期(YYYY-MM-DD),前端用的 <input type="date"> 即此形态
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def normalize_data_start(value) -> str | None:
+    """配置项 data_start(数据起点)→ 归一化时间戳,或 None(不设起点)。
+
+    接受 YYYY-MM-DD / YYYY-MM-DDTHH:MM / YYYY-MM-DDTHH:MM:SS 三种写法(月/日未补零
+    也认,配置是手写的);空值(None / "")表示不设起点。其余形态抛 ValueError ——
+    配置写坏应启动即失败,而不是静默忽略、让人以为起点生效了。
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).strftime(_TS_FMT)
+        except ValueError:
+            continue
+    raise ValueError(f"数据起点无法解析(期望 YYYY-MM-DD[THH:MM[:SS]]):{value!r}")
+
+
+def _now_ts() -> str:
+    return datetime.now().strftime(_TS_FMT)
+
+
+def _day_start(date_str: str) -> str:
+    """日期 → 该日 00:00:00 的时间戳(顺带校验日期真实存在:2 月 30 日会抛 ValueError)。"""
+    return datetime.strptime(date_str, "%Y-%m-%d").strftime(_TS_FMT)
+
+
+def _day_after(date_str: str) -> str:
+    """日期 → 次日 00:00:00 的时间戳(自定义范围的结束日含当天整天)。"""
+    day = datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)
+    return day.strftime(_TS_FMT)
+
 
 # 跨域白名单:上报脚本只在 iirose 页面注入,其余来源一律不放行
 # (任意其他网页不得读写本机接口,防统计库投毒)
@@ -58,9 +101,12 @@ def create_app(
     anomaly_config: dict | None = None,
     js_dir: Path | None = None,
     interval_seconds: float = 60,
+    data_start: str | None = None,
 ) -> web.Application:
     app = web.Application(middlewares=[cors_private_network])
     anomaly_cfg = anomaly_config or {}
+    # 数据起点:早于该时刻的样本不统计、不显示(样本仍保留在库里,可改小或清空配置后再看)
+    data_start_ts = normalize_data_start(data_start)
     log = logging.getLogger("iirose.web")
 
     async def collector_js(_request: web.Request) -> web.StreamResponse:
@@ -76,23 +122,64 @@ def create_app(
     async def index(_request: web.Request) -> web.StreamResponse:
         return web.FileResponse(web_dir / "dashboard.html")
 
+    def _window(request: web.Request) -> tuple[str, str | None, str | None]:
+        """请求参数 → (范围名, 生效下界, 生效上界)。
+
+        下界含、上界不含;None 表示该端不设限(上界 None 即"到现在",由前端跟着刷新)。
+        带 start/end 时走自定义范围:start/end 均为日期,结束日含当天整天;
+        不带时走预设 range。两侧都先被数据起点顶住 —— 早于起点的样本一律不返回。
+        """
+        start_q = (request.query.get("start") or "").strip()
+        end_q = (request.query.get("end") or "").strip()
+        if not start_q and not end_q:
+            name = request.query.get("range", "24h")
+            seconds = _RANGES.get(name, _RANGES["24h"])
+            since = None if seconds is None else (
+                datetime.now() - timedelta(seconds=seconds)
+            ).strftime(_TS_FMT)
+            if since is None or (data_start_ts and since < data_start_ts):
+                since = data_start_ts
+            return name, since, None
+
+        for label, value in (("start", start_q), ("end", end_q)):
+            if value and not _DATE_RE.match(value):
+                raise ValueError(f"{label} 需为 YYYY-MM-DD 日期")
+        if start_q and end_q and start_q > end_q:
+            raise ValueError("开始日期不能晚于结束日期")
+        since = _day_start(start_q) if start_q else data_start_ts
+        if since and data_start_ts and since < data_start_ts:
+            since = data_start_ts
+        until = _day_after(end_q) if end_q else None
+        if until and until > _now_ts():
+            until = None  # 结束日含今天:上界交回"现在",不画未来那段空白
+        if since and until and since >= until:
+            # 只有一种可能:所选区间整个落在数据起点之前(开始晚于结束已在上面拦掉)
+            raise ValueError(f"所选区间早于数据起点({since[:10]}),没有可显示的样本")
+        return "custom", since, until
+
     async def api_series(request: web.Request) -> web.Response:
-        rng = request.query.get("range", "24h")
-        seconds = _RANGES.get(rng, _RANGES["24h"])
-        since = None
-        if seconds is not None:
-            since = (datetime.now() - timedelta(seconds=seconds)).strftime(
-                "%Y-%m-%dT%H:%M:%S"
-            )
-        rows = await asyncio.to_thread(db.query, since)
+        try:
+            rng, since, until = _window(request)
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        rows = await asyncio.to_thread(db.query, since, None, until)
         # interval_seconds 供前端按采样节拍重建时间线、显示数据缺口
+        # data_start/start/end:前端据此画固定时间窗口(自定义范围)与提示数据起点
         return web.json_response(
-            {"range": rng, "samples": rows, "interval_seconds": interval_seconds}
+            {
+                "range": rng,
+                "samples": rows,
+                "interval_seconds": interval_seconds,
+                "data_start": data_start_ts,
+                "start": since,
+                "end": until,
+            }
         )
 
     async def api_latest(_request: web.Request) -> web.Response:
-        row = await asyncio.to_thread(db.latest)
-        return web.json_response({"sample": row})
+        # 数据起点之后的最近一条;起点之前无样本时返回 None(前端显示"—")
+        row = await asyncio.to_thread(db.latest, data_start_ts)
+        return web.json_response({"sample": row, "data_start": data_start_ts})
 
     async def api_ingest(request: web.Request) -> web.Response:
         """浏览器侧上报入口(POST JSON:{online,real,chatting,active,away,heat})。

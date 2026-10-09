@@ -30,6 +30,8 @@ def test_load_config_missing_file_returns_defaults(tmp_path):
     config = load_config(tmp_path / "nope.yaml")
     assert config["interval_seconds"] == 600
     assert config["ws"]["enabled"] is False
+    # 数据起点:与已部署配置一致的默认值(删掉那行配置不会把试跑期数据放回来)
+    assert config["data_start"] == "2026-09-30T00:00:00"
 
 
 def test_num_validation():

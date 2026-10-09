@@ -100,6 +100,23 @@ h1 { font-size: 20px; font-weight: 600; }
 }
 .filters button.active { color: var(--text-primary); font-weight: 600; background: var(--gridline); }
 #updatedAt { margin-left: auto; font-size: 12px; color: var(--muted); }
+/* .filters 自带 display:flex,会盖掉 hidden 属性的 UA 样式,须显式声明 */
+.filters[hidden] { display: none; }
+.filters input[type="date"] {
+  font: inherit; font-size: 13px; color: var(--text-primary);
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 5px 8px;
+}
+.filters input[type="date"]:focus { outline: none; border-color: var(--baseline); }
+.filters .to { font-size: 13px; color: var(--muted); }
+#applyCustom {
+  font: inherit; font-size: 13px; color: var(--text-primary);
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 14px; cursor: pointer;
+}
+#applyCustom:hover { border-color: var(--baseline); }
+#customMsg, .hint { font-size: 12px; color: var(--muted); }
+.hint { margin: -6px 0 12px; }
 
 /* ===== 图表 ===== */
 .chart-wrap {
@@ -151,9 +168,20 @@ tbody tr:nth-child(even) { background: color-mix(in srgb, var(--gridline) 35%, t
       <button data-range="24h" class="active">24 小时</button>
       <button data-range="7d">7 天</button>
       <button data-range="all">全部</button>
+      <button data-range="custom">自定义</button>
     </div>
     <span id="updatedAt"></span>
   </div>
+
+  <div class="filters" id="customRow" hidden>
+    <span style="font-size:13px;color:var(--muted)">日期</span>
+    <input type="date" id="dateStart" aria-label="开始日期">
+    <span class="to">至</span>
+    <input type="date" id="dateEnd" aria-label="结束日期">
+    <button id="applyCustom">应用</button>
+    <span id="customMsg"></span>
+  </div>
+  <div class="hint" id="dataStartHint"></div>
 
   <div class="chart-wrap">
     <div id="chart"></div>
@@ -161,7 +189,7 @@ tbody tr:nth-child(even) { background: color-mix(in srgb, var(--gridline) 35%, t
   </div>
 
   <div class="table-wrap">
-    <h2>数据明细(最近 100 条)</h2>
+    <h2>数据明细(范围内最近 100 条)</h2>
     <table>
       <thead><tr>
         <th>时间</th><th>Online</th><th>Chatting</th><th>Active</th><th>Away</th><th>真人</th><th>热度</th>
@@ -183,11 +211,12 @@ const SERIES = [
   { key: "heat",     label: "热度",     slot: "--series-6", axis: 1 },
 ];
 let currentRange = "24h";
+let customRange = null;     // 已应用的自定义范围 {start, end}(均为 YYYY-MM-DD),未应用为 null
 let chart = null;
 let lastSamples = [];
 let lastDataTs = null;      // 上次轮询拿到的最新采样 ts:未变则不动 DOM/图表
 let lastRenderedTs = null;  // 图表当前绘制的最新 ts
-let lastWindowSec = null;   // 上次渲染用的固定时间窗口(秒),主题切换重绘时复用
+let lastWindow = null;      // 上次渲染的固定时间窗口 {minMs, maxMs|null};null = 横轴自适应
 const RANGE_SECONDS = { "1h": 3600, "3h": 3 * 3600, "8h": 8 * 3600, "24h": 86400, "7d": 7 * 86400, "all": null };
 
 /* ===== 线条显隐 =====
@@ -243,12 +272,12 @@ document.getElementById("themeBtn").addEventListener("click", () => {
   document.documentElement.dataset.theme = effectiveDark() ? "light" : "dark";
   syncThemeBtn();
   initChart();
-  renderChart(lastSamples, true, lastWindowSec);
+  renderChart(lastSamples, true, lastWindow);
 });
 osDark.addEventListener("change", () => {
   if (!document.documentElement.dataset.theme) {
     initChart();
-    renderChart(lastSamples, true, lastWindowSec);
+    renderChart(lastSamples, true, lastWindow);
   }
 });
 syncThemeBtn();
@@ -353,11 +382,15 @@ function initChart() {
     hiddenKeys.clear();
     for (const s of SERIES) if (p.selected[s.label] === false) hiddenKeys.add(s.key);
     saveHiddenKeys();
-    renderChart(lastSamples, true, lastWindowSec);
+    renderChart(lastSamples, true, lastWindow);
   });
 }
 
-function renderChart(samples, force, windowSec) {
+/* 固定时间窗口:预设范围用 {sec}(上界始终是"现在",跟着刷新滑动);
+ * 自定义范围用后端的生效区间 {minMs, maxMs}(临时从库里取出来的「实际生效窗口」)。
+ * maxMs 为 null = 上界跟着"现在"走 —— 预设范围、以及结束日含今天的自定义范围都是这种。
+ * win 为 null 时横轴自适应(「全部」)。 */
+function renderChart(samples, force, win) {
   lastSamples = samples;
   const lastTs = samples.length ? samples[samples.length - 1].ts : null;
   // 无新数据时跳过重绘(轮询比采样频繁,5/6 的轮询是空跑)
@@ -369,10 +402,15 @@ function renderChart(samples, force, windowSec) {
   dom.style.display = samples.length ? "block" : "none";
   if (samples.length) {
     const option = { ...baseOption(), animation: lastRenderedTs === null, series: seriesOption(samples) };
-    if (windowSec) {
-      lastWindowSec = windowSec;
-      // 固定时间窗口:横轴始终显示 [now-窗口, now],缺失时段显示为空缺,不压缩到有数据的部分
-      option.xAxis = { ...option.xAxis, min: new Date(Date.now() - windowSec * 1000), max: new Date() };
+    lastWindow = win;
+    if (win) {
+      // 固定时间窗口:横轴始终显示完整区间,缺失时段显示为空缺,不压缩到有数据的部分。
+      // 窗口起点由后端给(已顶过数据起点),预设范围才在前端按"现在"重算。
+      option.xAxis = {
+        ...option.xAxis,
+        min: new Date(win.sec ? Date.now() - win.sec * 1000 : win.minMs),
+        max: new Date(win.maxMs || Date.now()),
+      };
     }
     // 动画只播首次(此后每秒刷新都瞬时重绘,避免长列表反复播动画造成卡顿)
     chart.setOption(option, true);
@@ -381,20 +419,77 @@ function renderChart(samples, force, windowSec) {
 }
 
 /* ===== 数据 ===== */
+/* 当前查询参数:自定义范围用 start/end 两个日期,其余走 range 预设 */
+function seriesQuery() {
+  if (currentRange === "custom" && customRange) {
+    return `start=${customRange.start}&end=${customRange.end}`;
+  }
+  return `range=${currentRange}`;
+}
+
+/* 本次查询用什么窗口画横轴:自定义范围用后端给的生效区间(会被数据起点顶住),
+ * 预设范围用固定时长。返回 null 表示横轴自适应(「全部」)。 */
+function windowFor(body) {
+  if (currentRange === "custom" && body.start) {
+    const minMs = new Date(body.start).getTime();
+    if (!Number.isFinite(minMs)) return null;
+    const endMs = body.end ? new Date(body.end).getTime() : NaN;
+    return { minMs: minMs, maxMs: Number.isFinite(endMs) ? endMs : null };
+  }
+  const sec = RANGE_SECONDS[currentRange];
+  return sec ? { sec: sec, maxMs: null } : null;
+}
+
+function pad2(n) { return String(n).padStart(2, "0"); }
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+function shiftDays(dateStr, days) {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+/* 数据起点(后端配置):日期输入的下限 + 页面上一句提示。
+ * 早于起点的样本既不进图表也不进瓦片,但仍在服务器的库里;改配置重启即可换。 */
+let dataStartIso = null;
+function updateDataStart(value) {
+  const next = value || null;
+  if (next === dataStartIso) return;
+  dataStartIso = next;
+  const day = next ? next.slice(0, 10) : "";
+  document.getElementById("dataStartHint").textContent = day
+    ? `数据起点 ${day} 00:00 —— 更早的样本不计入图表与瓦片,仍保留在服务器库中`
+    : "";
+  for (const id of ["dateStart", "dateEnd"]) {
+    const el = document.getElementById(id);
+    if (day) el.min = day; else el.removeAttribute("min");
+    el.max = todayStr();
+  }
+}
+
 async function refresh(force) {
   try {
     const [seriesResp, latestResp] = await Promise.all([
-      fetch(`/api/series?range=${currentRange}`),
+      fetch(`/api/series?${seriesQuery()}`),
       fetch("/api/latest"),
     ]);
-    const { samples, interval_seconds } = await seriesResp.json();
+    const body = await seriesResp.json().catch(() => ({}));
+    if (!seriesResp.ok) {  // 日期参数非法等:后端给出原因,退回上一次的图不动
+      document.getElementById("updatedAt").textContent = body.error || "查询失败";
+      return;
+    }
+    const samples = body.samples || [];
+    const interval_seconds = body.interval_seconds;
+    updateDataStart(body.data_start);
     const lastTs = samples.length ? samples[samples.length - 1].ts : null;
     if (!force && lastTs !== null && lastTs === lastDataTs) return; // 采样未变,不动 DOM
     lastDataTs = lastTs;
     const intervalSec = Number.isFinite(interval_seconds) && interval_seconds > 0 ? interval_seconds : 60;
     document.querySelector(".sub").textContent =
       `全站数据 · 每 ${Math.round(intervalSec)} 秒采样 · 点图例可隐藏/显示线条`;
-    renderChart(padGaps(samples, intervalSec), force, RANGE_SECONDS[currentRange] ?? null);
+    renderChart(padGaps(samples, intervalSec), force, windowFor(body));
 
     const { sample } = await latestResp.json();
     if (sample) {
@@ -428,11 +523,37 @@ if (window.ResizeObserver) {
     .observe(document.getElementById("chart"));
 }
 
+/* ===== 时间范围切换 ===== */
+const dateStart = document.getElementById("dateStart");
+const dateEnd = document.getElementById("dateEnd");
+const customRow = document.getElementById("customRow");
+const customMsg = document.getElementById("customMsg");
+
 document.getElementById("rangeGrp").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-range]");
   if (!btn) return;
   currentRange = btn.dataset.range;
   document.querySelectorAll("#rangeGrp button").forEach((b) => b.classList.toggle("active", b === btn));
+  customRow.hidden = currentRange !== "custom";
+  if (currentRange === "custom" && !customRange) {
+    // 首次切到自定义:预填 [数据起点(未设则近 7 天), 今天] 并直接查一次,再改日期点「应用」
+    const end = todayStr();
+    const start = dataStartIso ? dataStartIso.slice(0, 10) : shiftDays(end, -6);
+    dateStart.value = start;
+    dateEnd.value = end;
+    customRange = { start: start, end: end };
+  }
+  customMsg.textContent = "";
+  refresh(true);
+});
+
+/* 应用:两个日期都填、开始不晚于结束才发查询(结束日含当天整天,由后端顶到次日 0 点) */
+document.getElementById("applyCustom").addEventListener("click", () => {
+  const start = dateStart.value, end = dateEnd.value;
+  if (!start || !end) { customMsg.textContent = "请选开始与结束日期"; return; }
+  if (start > end) { customMsg.textContent = "开始日期不能晚于结束日期"; return; }
+  customMsg.textContent = "";
+  customRange = { start: start, end: end };
   refresh(true);
 });
 

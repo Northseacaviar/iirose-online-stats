@@ -16,7 +16,7 @@ from collector.sampler import Sampler
 from collector.userlist import UserList
 from collector.ws_client import IIRoseClient
 from storage.db import Database
-from web.server import create_app
+from web.server import create_app, normalize_data_start
 
 ROOT = Path(__file__).resolve().parent
 
@@ -34,6 +34,8 @@ _DEFAULT_CONFIG = {
         "room": "5ce6a4b520a90",
     },
     "database": "data/iirose_stats.db",
+    # 数据起点:早于该时刻的样本不统计、不显示(样本仍留在库中);"" = 不设起点
+    "data_start": "2026-09-30T00:00:00",
 }
 
 
@@ -125,6 +127,12 @@ async def main() -> None:
     acct = config.get("account", {})
     ws_enabled = bool(ws_cfg.get("enabled", False))
     anomaly_cfg = config.get("anomaly") or {}
+    # 数据起点:配置写坏时启动即失败(不静默忽略,否则会以为起点生效了)
+    try:
+        data_start = normalize_data_start(config.get("data_start"))
+    except ValueError as exc:
+        logging.getLogger("iirose").error("%s", exc)
+        raise SystemExit(2) from exc
     interval_seconds = _num(config["interval_seconds"], 600.0, 1.0)  # ≤0 会导致忙循环/前端死循环
     if ws_enabled:
         client = IIRoseClient(
@@ -153,13 +161,18 @@ async def main() -> None:
         anomaly_config=anomaly_cfg,
         js_dir=ROOT.parent / "browser-js",  # 网页 JS 唯一来源
         interval_seconds=interval_seconds,
+        data_start=data_start,
     )
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host=web_cfg["host"], port=int(web_cfg["port"]))
     await site.start()
 
-    log.info("仪表盘: http://%s:%d 采集间隔:%ds", web_cfg["host"], web_cfg["port"], config["interval_seconds"])
+    log.info(
+        "仪表盘: http://%s:%d 采集间隔:%ds 数据起点:%s",
+        web_cfg["host"], web_cfg["port"], config["interval_seconds"],
+        data_start or "(不设起点)",
+    )
     tasks = []
     if ws_enabled:
         log.info("WS 端点: wss://%s:%d(账号 %s)", ", ".join(ws_cfg["hosts"]), ws_cfg["port"], acct.get("username") or "(未配置)")

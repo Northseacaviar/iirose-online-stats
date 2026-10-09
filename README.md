@@ -1,6 +1,6 @@
 # iirose 在线状态监测器
 
-周期采集 [iirose](https://www.iirose.com) 全站在线六项数据(online 总人数 / real 真人(去 A.I.) / chatting / active / away / heat 热度),存入本地 SQLite,并用本地 Web 仪表盘展示走势图。统计口径与网页终端 `stats` 指令同源。
+周期采集 [iirose](https://www.iirose.com) 全站在线六项数据(online 总人数 / real 真人(去 A.I.) / chatting / active / away / heat 热度),存入本地 SQLite,并用本地 Web 仪表盘展示走势图(时间范围可选预设或自定义日期区间)。统计口径与网页终端 `stats` 指令同源。
 
 ## 目录结构
 

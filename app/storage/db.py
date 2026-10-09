@@ -105,16 +105,28 @@ class Database:
             )
             return cur.rowcount > 0
 
-    def query(self, since_ts: str | None = None, limit: int | None = None) -> list[dict]:
+    def query(
+        self,
+        since_ts: str | None = None,
+        limit: int | None = None,
+        until_ts: str | None = None,
+    ) -> list[dict]:
         """查询样本(时间升序)。
 
-        since_ts: 只取时间戳 >= 该值的样本;limit: 最多返回条数。
+        since_ts: 只取时间戳 >= 该值的样本(含);until_ts: 只取 < 该值的样本(不含);
+        limit: 最多返回条数。
         """
         sql = _SELECT
+        conds: list[str] = []
         params: tuple = ()
         if since_ts is not None:
-            sql += " WHERE ts >= ?"
-            params = (since_ts,)
+            conds.append("ts >= ?")
+            params += (since_ts,)
+        if until_ts is not None:
+            conds.append("ts < ?")
+            params += (until_ts,)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
         sql += " ORDER BY ts ASC"
         if limit is not None:
             sql += " LIMIT ?"
@@ -126,13 +138,19 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
         return [dict(zip(_KEYS, row)) for row in rows]
 
-    def latest(self) -> dict | None:
-        """最新一条样本;库为空时返回 None。"""
+    def latest(self, since_ts: str | None = None) -> dict | None:
+        """最新一条样本;库为空或样本都在 since_ts 之前时返回 None。"""
         # closing():sqlite3 连接的 with 只管事务提交,**不关闭连接** ——
         # 只用 with 会每次操作漏一个文件句柄,靠 GC 兜底,漏到 fd 上限后
         # 读写全部报 "unable to open database file"(实测:1024 软限,约 54 小时打满)。
+        sql = _SELECT
+        params: tuple = ()
+        if since_ts is not None:
+            sql += " WHERE ts >= ?"
+            params = (since_ts,)
+        sql += " ORDER BY ts DESC LIMIT 1"
         with closing(self._connect()) as conn, conn:
-            row = conn.execute(_SELECT + " ORDER BY ts DESC LIMIT 1").fetchone()
+            row = conn.execute(sql, params).fetchone()
         if row is None:
             return None
         return dict(zip(_KEYS, row))
