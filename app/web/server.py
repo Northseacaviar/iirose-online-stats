@@ -108,6 +108,15 @@ async def cors_private_network(request: web.Request, handler):
     return resp
 
 
+def data_start_in_future(data_start_ts: str | None) -> bool:
+    """数据起点是否晚于当前时间。
+
+    这种配置下所有视图都是空的(每条样本都早于起点)。启动时提醒一句,
+    比让人盯着空图猜"是不是采集器挂了"强。两串都是定宽本地时间戳,字典序即时序。
+    """
+    return bool(data_start_ts) and data_start_ts > _now_ts()
+
+
 def create_app(
     db: Database,
     web_dir: Path,
@@ -157,12 +166,16 @@ def create_app(
         for label, value in (("start", start_q), ("end", end_q)):
             if value and not _DATE_RE.match(value):
                 raise ValueError(f"{label} 需为 YYYY-MM-DD 日期")
-        if start_q and end_q and start_q > end_q:
+        # 先把日期解析出来(顺带校验"这天真的存在"),再比大小 —— 反过来的话
+        # 2026-13-45 会被字典序判成"晚于结束日",报出驴唇不对马嘴的原因
+        start_ts = _day_start(start_q) if start_q else None
+        end_next = _day_after(end_q) if end_q else None  # 结束日次日 0 点 = 该日整天含在内
+        if start_ts and end_next and start_ts >= end_next:
             raise ValueError("开始日期不能晚于结束日期")
-        since = _day_start(start_q) if start_q else data_start_ts
+        since = start_ts if start_ts else data_start_ts
         if since and data_start_ts and since < data_start_ts:
             since = data_start_ts
-        until = _day_after(end_q) if end_q else None
+        until = end_next
         if until and until > _now_ts():
             until = None  # 结束日含今天:上界交回"现在",不画未来那段空白
         if since and until and since >= until:

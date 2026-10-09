@@ -15,7 +15,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from storage.db import Database
-from web.server import create_app, normalize_data_start
+from web.server import create_app, data_start_in_future, normalize_data_start
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -42,6 +42,51 @@ def _seed(db: Database, stamps: list[str]) -> None:
 
 def _ts_of(body: dict) -> list[str]:
     return [row["ts"] for row in body["samples"]]
+
+
+def test_impossible_date_reports_date_error(tmp_path):
+    """不存在的日期要报"日期不存在"。
+
+    回归:`2026-13-45` 字典序上大于 `2026-10-01`,校验顺序若先比字符串后解析日期,
+    就会把"日期写错了"误报成"开始日期不能晚于结束日期"。
+    """
+    async def run():
+        db = Database(tmp_path / "t.db")
+        _seed(db, _SEED)
+        async with _client(db, DATA_START) as cli:
+            for query, expect in (
+                ("start=2026-13-45&end=2026-10-01", "日期不存在"),
+                ("start=2026-99-99&end=2026-10-01", "日期不存在"),
+                ("start=0000-01-01&end=2026-10-01", "日期不存在"),
+                ("start=2026-10-09&end=2026-10-01", "开始日期不能晚于结束日期"),
+            ):
+                resp = await cli.get(f"/api/series?{query}")
+                body = await resp.json()
+                assert resp.status == 400, query
+                assert expect in body["error"], (query, body["error"])
+    asyncio.run(run())
+
+
+def test_data_start_in_future_helper():
+    """起点晚于当前时间:启动提醒与前端提示共用的判定。"""
+    assert data_start_in_future("2999-01-01T00:00:00") is True
+    assert data_start_in_future("2020-01-01T00:00:00") is False
+    assert data_start_in_future(None) is False
+    assert data_start_in_future("") is False
+
+
+def test_run_warns_when_data_start_in_future(caplog):
+    """启动时起点若在未来,要 WARNING 一声(否则空图看着像程序坏了)。"""
+    import logging
+
+    from run import _warn_future_data_start
+
+    log = logging.getLogger("iirose.test")
+    _warn_future_data_start(log, "2999-01-01T00:00:00")
+    _warn_future_data_start(log, "2020-01-01T00:00:00")  # 正常起点不该出声
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warns) == 1, [r.getMessage() for r in warns]
+    assert "晚于当前时间" in warns[0].getMessage()
 
 
 def test_custom_range_is_day_inclusive(tmp_path):

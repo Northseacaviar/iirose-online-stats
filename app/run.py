@@ -16,7 +16,7 @@ from collector.sampler import Sampler
 from collector.userlist import UserList
 from collector.ws_client import IIRoseClient
 from storage.db import Database
-from web.server import create_app, normalize_data_start
+from web.server import create_app, data_start_in_future, normalize_data_start
 
 ROOT = Path(__file__).resolve().parent
 
@@ -115,6 +115,14 @@ async def _guarded(factory: Callable[[], Awaitable[None]], name: str) -> None:
             await asyncio.sleep(5.0)
 
 
+def _warn_future_data_start(log: logging.Logger, data_start: str | None) -> None:
+    """数据起点晚于当前时间时提醒一声:这种配置下所有视图都是空的。"""
+    if data_start_in_future(data_start):
+        log.warning(
+            "数据起点(%s)晚于当前时间:所有视图都会是空的 —— 是不是日期写错了?", data_start
+        )
+
+
 async def main() -> None:
     setup_logging()
     log = logging.getLogger("iirose")
@@ -173,6 +181,7 @@ async def main() -> None:
         web_cfg["host"], web_cfg["port"], config["interval_seconds"],
         data_start or "(不设起点)",
     )
+    _warn_future_data_start(log, data_start)
     tasks = []
     if ws_enabled:
         log.info("WS 端点: wss://%s:%d(账号 %s)", ", ".join(ws_cfg["hosts"]), ws_cfg["port"], acct.get("username") or "(未配置)")

@@ -343,6 +343,10 @@ function seriesOption(samples) {
     data: samples.map((r) => [new Date(r.ts), r[s.key]]),
     showSymbol: false,
     connectNulls: false, // 缺失时段断线显示,不画误导性的跨越连线
+    // 点数远多于像素宽度时按 LTTB 抽样(实测 14928 点 → 渲染 1000 点,1042px 画布):
+    // 「全部」/跨月区间一年后会到 5 万点,不抽样每 10 秒重绘会越来越重。
+    // 缺失时段的断口不受影响(抽样后依然断开,已实测)。
+    sampling: "lttb",
     lineStyle: { width: 2 },
     emphasis: { lineStyle: { width: 3 } },
   }));
@@ -399,6 +403,13 @@ function renderChart(samples, force, win) {
   const dom = document.getElementById("chart");
   const empty = document.getElementById("empty");
   empty.style.display = samples.length ? "none" : "flex";
+  if (!samples.length) {
+    // 空图有两种成因,别让人一律以为"采集器挂了"
+    const text = dataStartInFuture()
+      ? "数据起点晚于当前时间 —— 库内暂无可用样本(把配置里的 data_start 改小后重启)"
+      : "暂无数据 —— 等待采集器连上 iirose 并完成首次采样";
+    if (empty.textContent !== text) empty.textContent = text;
+  }
   dom.style.display = samples.length ? "block" : "none";
   if (samples.length) {
     const option = { ...baseOption(), animation: lastRenderedTs === null, series: seriesOption(samples) };
@@ -459,14 +470,26 @@ function updateDataStart(value) {
   if (next === dataStartIso) return;
   dataStartIso = next;
   const day = next ? next.slice(0, 10) : "";
-  document.getElementById("dataStartHint").textContent = day
-    ? `数据起点 ${day} 00:00 —— 更早的样本不计入图表与瓦片,仍保留在服务器库中`
-    : "";
+  // 起点晚于当前时间时,库里一条可用样本都没有 —— 这种配置直说,否则看着像程序坏了。
+  // (比的是完整时间戳而不只是日期:起点写成"今天 23:00"同样会让所有视图变空。)
+  const future = dataStartInFuture();
+  document.getElementById("dataStartHint").textContent = !day
+    ? ""
+    : future
+      ? `数据起点 ${day} 00:00 晚于当前时间 —— 库内暂无可用样本(把 data_start 改小后重启采集器)`
+      : `数据起点 ${day} 00:00 —— 更早的样本不计入图表与瓦片,仍保留在服务器库中`;
   for (const id of ["dateStart", "dateEnd"]) {
     const el = document.getElementById(id);
-    if (day) el.min = day; else el.removeAttribute("min");
+    // 起点在未来时不设下限:否则 min 晚于 max,日期框直接选不出东西
+    if (day && !future) el.min = day; else el.removeAttribute("min");
     el.max = todayStr();
   }
+}
+
+/* 数据起点是否晚于当前时间(前端据此解释"图为什么是空的") */
+function dataStartInFuture() {
+  const ms = dataStartIso ? new Date(dataStartIso).getTime() : NaN;
+  return Number.isFinite(ms) && ms > Date.now();
 }
 
 /* 请求序号:轮询与"点按钮"并发时,老请求晚回来不许覆盖新状态(实测会画成旧范围) */
