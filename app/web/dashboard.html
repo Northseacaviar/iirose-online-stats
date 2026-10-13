@@ -22,6 +22,7 @@
   --series-4:        #f04747;  /* Away     红(站点挂机色) */
   --series-5:        #2f9e9e;  /* 真人(去 AI) 青 */
   --series-6:        #c0703a;  /* 热度       琥珀 */
+  --series-7:        #6d4bc4;  /* 24h 均线   紫 */
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
@@ -40,6 +41,7 @@
     --series-4:        #f04747;  /* Away     红 */
     --series-5:        #4bb5b5;  /* 真人(去 AI) 青 */
     --series-6:        #e0975a;  /* 热度       琥珀 */
+    --series-7:        #a78bfa;  /* 24h 均线   紫 */
   }
 }
 :root[data-theme="dark"] {
@@ -58,6 +60,7 @@
   --series-4:        #c98500;
   --series-5:        #4bb5b5;
   --series-6:        #e0975a;
+  --series-7:        #a78bfa;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -204,6 +207,9 @@ tbody tr:nth-child(even) { background: color-mix(in srgb, var(--gridline) 35%, t
 "use strict";
 const SERIES = [
   { key: "online",   label: "Online",   slot: "--series-1" },
+  // 24h 均线是派生指标:只上图,不进瓦片/明细表(derived);decimals 供图例显示一位小数
+  { key: "online_ma24", label: "Online 24h 均", slot: "--series-7",
+    width: 3, derived: true, decimals: 1 },
   { key: "chatting", label: "Chatting", slot: "--series-2" },
   { key: "active",   label: "Active",   slot: "--series-3" },
   { key: "away",     label: "Away",     slot: "--series-4" },
@@ -306,7 +312,11 @@ function baseOption() {
         const meta = SERIES.find((x) => x.label === name);
         const row = lastSamples[lastSamples.length - 1];
         const v = meta && row ? row[meta.key] : null;
-        return v === null || v === undefined ? name : `${name} ${v}`;
+        if (v === null || v === undefined) return name;
+        // 均值是实数,按系列声明的位数显示;其余指标是整数,原样显示
+        const shown = meta.decimals != null && typeof v === "number"
+          ? v.toFixed(meta.decimals) : v;
+        return `${name} ${shown}`;
       },
     },
     grid: { left: 8, right: 24, top: 36, bottom: 8, containLabel: true },
@@ -347,8 +357,8 @@ function seriesOption(samples) {
     // 「全部」/跨月区间一年后会到 5 万点,不抽样每 10 秒重绘会越来越重。
     // 缺失时段的断口不受影响(抽样后依然断开,已实测)。
     sampling: "lttb",
-    lineStyle: { width: 2 },
-    emphasis: { lineStyle: { width: 3 } },
+    lineStyle: { width: s.width || 2 },
+    emphasis: { lineStyle: { width: (s.width || 2) + 1 } },
   }));
 }
 
@@ -369,7 +379,7 @@ function padGaps(samples, intervalSec) {
     const t1 = new Date(samples[i + 1].ts).getTime();
     if (t1 - t0 > stepMs * 2) {
       for (let t = t0 + stepMs; t + stepMs <= t1; t += stepMs) {
-        out.push({ ts: fmt(new Date(t)), online: null, chatting: null, active: null, away: null, real: null, heat: null });
+        out.push({ ts: fmt(new Date(t)), online: null, online_ma24: null, chatting: null, active: null, away: null, real: null, heat: null });
       }
     }
   }
@@ -528,7 +538,7 @@ async function refresh(force) {
         const tdTime = document.createElement("td");
         tdTime.textContent = r.ts.replace("T", " ").slice(5, 19);
         tr.appendChild(tdTime);
-        for (const s of SERIES) {
+        for (const s of SERIES.filter((x) => !x.derived)) {
           const td = document.createElement("td");
           td.textContent = r[s.key];
           tr.appendChild(td);
@@ -542,7 +552,11 @@ async function refresh(force) {
     const { sample } = await latestResp.json();
     if (seq !== fetchSeq) return;
     if (sample) {
-      for (const s of SERIES) document.getElementById("v-" + s.key).textContent = sample[s.key];
+      // 派生指标(24h 均线)没有对应的瓦片,别去取它 —— 取不到会抛异常,
+      // 整个 refresh 落进 catch,页头就一直显示"刷新失败"。
+      for (const s of SERIES.filter((x) => !x.derived)) {
+        document.getElementById("v-" + s.key).textContent = sample[s.key];
+      }
       document.getElementById("updatedAt").textContent = "最后采样 " + sample.ts.replace("T", " ").slice(5, 19);
     }
   } catch (e) {

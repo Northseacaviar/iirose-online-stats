@@ -84,6 +84,59 @@ _ALLOWED_ORIGINS = {"https://iirose.com", "https://www.iirose.com"}
 
 # 单样本数值上限:在线人数不可能达到的量级,同时防 sqlite 整数溢出
 _MAX_SAMPLE_VALUE = 1_000_000_000
+# 24 小时滑动平均:每个样本往前 24 小时窗口内 online 的算术平均
+# 窗口只吃 >= 数据起点的样本(起点是读侧口径,早于起点的样本不参与任何统计)
+_MA_WINDOW_SECONDS = 24 * 3600
+# 窗口完整性容差:窗口内样本数与覆盖时长都要达到满窗的 96% 才算数。
+# 线上采样有 9~12 分钟抖动,满窗实际是 143~145 条;卡"一条不少"会把正常的
+# 143 条窗口判成不完整,凭空造出一串断口(实测 148 个点),96% 下这些点全部保留。
+_MA_FULL_RATIO = 0.96
+
+
+def _with_online_ma(
+    rows: list[dict], out_since: str | None, interval_seconds: float,
+    log: logging.Logger | None = None,
+) -> list[dict]:
+    """给样本补 online_ma24:该样本往前 24 小时内 online 的算术平均。
+
+    rows: 升序样本,须含 out_since 之前 24 小时的样本(供窗口取用)。
+    返回: 只保留 ts >= out_since 的样本(即请求区间内的那些),每条多一个 online_ma24 键。
+    窗口不完整(不足满窗 96%)时给 None —— 宁可断线,不给一个"只用了十几小时"的假均值。
+    时间戳解析不了的样本直接跳过(不返回、也不当窗口材料):ts 是 TEXT 主键、库里没有格式
+    约束,读侧不能因为混进一条坏时间戳就整个请求 500。
+    """
+    parsed: list[tuple[datetime, dict]] = []
+    bad = 0
+    for r in rows:
+        try:
+            parsed.append((datetime.strptime(r["ts"], _TS_FMT), r))
+        except (ValueError, TypeError):
+            bad += 1
+    if bad and log is not None:
+        log.warning("跳过 %d 条时间戳无法解析的样本(不参与 24h 均值)", bad)
+    if not parsed:
+        return []
+    step = float(interval_seconds) if interval_seconds and interval_seconds > 0 else 60.0
+    need_count = (_MA_WINDOW_SECONDS / step) * _MA_FULL_RATIO
+    # 跨度兜底:样本数达标但时间跨度不足(实际节拍比配置密)时同样判为窗口不完整
+    need_span = _MA_WINDOW_SECONDS * _MA_FULL_RATIO - step
+    prefix = [0]
+    for _, r in parsed:
+        prefix.append(prefix[-1] + r["online"])
+    lo = 0
+    out: list[dict] = []
+    for i, (ts, row) in enumerate(parsed):
+        if out_since is not None and row["ts"] < out_since:
+            continue  # 落在请求区间之前:只是窗口的料,不返回
+        lo_ts = ts - timedelta(seconds=_MA_WINDOW_SECONDS)
+        while lo < i and parsed[lo][0] < lo_ts:
+            lo += 1
+        count = i - lo + 1
+        span = (ts - parsed[lo][0]).total_seconds()
+        complete = count >= need_count and span >= need_span
+        mean = (prefix[i + 1] - prefix[lo]) / count
+        out.append({**row, "online_ma24": round(mean, 1) if complete else None})
+    return out
 
 
 @web.middleware
@@ -188,7 +241,17 @@ def create_app(
             rng, since, until = _window(request)
         except ValueError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        rows = await asyncio.to_thread(db.query, since, None, until)
+        # 多取 24 小时前置样本供滑动平均取窗;但不许越过数据起点
+        # (起点是读侧口径:早于起点的样本不显示、也不参与统计)
+        ma_since = None
+        if since is not None:
+            ma_since = (
+                datetime.strptime(since, _TS_FMT) - timedelta(seconds=_MA_WINDOW_SECONDS)
+            ).strftime(_TS_FMT)
+            if data_start_ts and ma_since < data_start_ts:
+                ma_since = data_start_ts
+        rows = await asyncio.to_thread(db.query, ma_since, None, until)
+        rows = _with_online_ma(rows, since, interval_seconds, log)
         # interval_seconds 供前端按采样节拍重建时间线、显示数据缺口
         # data_start/start/end:前端据此画固定时间窗口(自定义范围)与提示数据起点
         return web.json_response(
