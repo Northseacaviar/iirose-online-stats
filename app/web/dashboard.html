@@ -22,7 +22,8 @@
   --series-4:        #f04747;  /* Away     红(站点挂机色) */
   --series-5:        #2f9e9e;  /* 真人(去 AI) 青 */
   --series-6:        #c0703a;  /* 热度       琥珀 */
-  --series-7:        #6d4bc4;  /* 24h 均线   紫 */
+  --series-7:        #6d4bc4;  /* 人数 24h 均线 紫 */
+  --series-8:        #c0508c;  /* 热度 72h 均线 玫红 */
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
@@ -41,7 +42,8 @@
     --series-4:        #f04747;  /* Away     红 */
     --series-5:        #4bb5b5;  /* 真人(去 AI) 青 */
     --series-6:        #e0975a;  /* 热度       琥珀 */
-    --series-7:        #a78bfa;  /* 24h 均线   紫 */
+    --series-7:        #a78bfa;  /* 人数 24h 均线 紫 */
+    --series-8:        #e389bb;  /* 热度 72h 均线 玫红 */
   }
 }
 :root[data-theme="dark"] {
@@ -61,6 +63,7 @@
   --series-5:        #4bb5b5;
   --series-6:        #e0975a;
   --series-7:        #a78bfa;
+  --series-8:        #e389bb;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -215,6 +218,9 @@ const SERIES = [
   { key: "away",     label: "Away",     slot: "--series-4" },
   { key: "real",     label: "真人",     slot: "--series-5" },
   { key: "heat",     label: "热度",     slot: "--series-6", axis: 1 },
+  // 热度的 72h 均线:与热度同挂右轴(量级比人数大一个数量级,挂左轴会把人数压平)
+  { key: "heat_ma72", label: "热度 72h 均", slot: "--series-8",
+    width: 3, derived: true, decimals: 1, axis: 1 },
 ];
 let currentRange = "24h";
 let customRange = null;     // 已应用的自定义范围 {start, end}(均为 YYYY-MM-DD),未应用为 null
@@ -251,6 +257,13 @@ function legendSelected() {
   const sel = {};
   for (const s of SERIES) sel[s.label] = !hiddenKeys.has(s.key);
   return sel;
+}
+
+/* 右轴刻度标签的颜色:跟右轴上第一条可见的线(默认就是热度那条;关掉热度只剩均线时,
+ * 刻度换成均线的颜色,免得玫红的线上挂着一排琥珀色刻度) */
+function rightAxisColor() {
+  const s = SERIES.find((x) => (x.axis || 0) === 1 && !hiddenKeys.has(x.key));
+  return cssVar(s ? s.slot : "--series-6");
 }
 
 /* ?theme=dark|light 便于无头验证/快速切换 */
@@ -334,11 +347,13 @@ function baseOption() {
         axisLabel: { color: muted, fontSize: 11 },
         splitLine: { lineStyle: { color: grid, width: 1 } },
       },
-      { // 右轴:热度(量级比人数大一个数量级,共轴会把人数压平);热度线隐藏时轴一并收起
+      { // 右轴:热度(量级比人数大一个数量级,共轴会把人数压平)
+        // 右轴上的线全被图例关掉时轴一并收起(只看 heat 会把"关了热度、留着热度均线"的
+        // 情形画成一条没有刻度的线);轴标签颜色仍随热度线走
         type: "value",
-        show: !hiddenKeys.has("heat"),
+        show: SERIES.some((s) => (s.axis || 0) === 1 && !hiddenKeys.has(s.key)),
         axisLine: { show: false },
-        axisLabel: { color: cssVar("--series-6"), fontSize: 11 }, // 与热度线同色,一眼对得上
+        axisLabel: { color: rightAxisColor(), fontSize: 11 }, // 与当前可见的右轴线同色,一眼对得上
         splitLine: { show: false },
       },
     ],
@@ -379,7 +394,7 @@ function padGaps(samples, intervalSec) {
     const t1 = new Date(samples[i + 1].ts).getTime();
     if (t1 - t0 > stepMs * 2) {
       for (let t = t0 + stepMs; t + stepMs <= t1; t += stepMs) {
-        out.push({ ts: fmt(new Date(t)), online: null, online_ma24: null, chatting: null, active: null, away: null, real: null, heat: null });
+        out.push({ ts: fmt(new Date(t)), online: null, online_ma24: null, chatting: null, active: null, away: null, real: null, heat: null, heat_ma72: null });
       }
     }
   }
